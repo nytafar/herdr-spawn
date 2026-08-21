@@ -1,9 +1,11 @@
 # herdr-spawn
 
-Hand a prompt you composed in a chat to a **real Claude Code session** on one of your
-own machines, with Remote Control on, and get back a link that opens it in the Code tab.
+Hand a prompt you composed in a chat to a **real coding agent** on one of your own
+machines. With Claude Code that means Remote Control is on and you get back a link that
+opens the session in the Code tab; with the other agents you get a live pane you take
+over in the terminal.
 
-One tool. `spawn_claude`.
+One tool. `spawn_agent`.
 
 The chat does what a chat is good at — thinking the task through with you — and then
 the actual work happens in a real terminal, on a real checkout, with your real
@@ -19,16 +21,16 @@ this drives.
 ## What it does
 
 ```
-spawn_claude(host, prompt, [cwd], [label], [session_name], [workspace], [wait])
-  -> {status, session_name, workspace_id, tab_id, pane_id, cwd,
-      session_id, remote_url, agent_status}
+spawn_agent(host, prompt, [agent], [cwd], [label], [session_name], [workspace], [wait])
+  -> {status, host, agent, session_name, workspace_id, tab_id, pane_id, cwd,
+      session_id, agent_status, remote_url | continue_with}
 ```
 
-1. **Preflight** — host enabled, `cwd` resolves under an allowed root, `cwd` already
-   trusted by Claude Code, herdr answering on that host.
+1. **Preflight** — host enabled, the agent available *there*, `cwd` resolves under an
+   allowed root and is already trusted by that agent, herdr answering on that host.
 2. Find or create the `inbox` workspace, `--no-focus`.
-3. Create a tab there and start `claude --remote-control <session_name>` in its pane.
-4. Resolve the claude.ai Remote Control id.
+3. Create a tab there and start the agent in its pane.
+4. Resolve the claude.ai Remote Control id — Claude Code only.
 5. Submit the prompt, under a per-pane lock.
 6. Append a record to `~/.local/state/herdr-spawn/spawns.jsonl`.
 
@@ -77,6 +79,50 @@ service can do for you:
   alive and doing nothing. Preflight checks this and refuses rather than letting it
   happen.
 
+## Agents
+
+herdr drives 21 coding agents — `pi claude codex gemini cursor devin agy cline omp
+mastracode opencode copilot kimi kiro droid amp grok hermes kilo qodercli maki`
+(`agy` is Antigravity CLI). This exposes all of them, but **advertises only the ones
+you actually have.**
+
+At startup each enabled host is asked two questions: what kinds does its herdr support
+(parsed from `agent start --help`, because the set grows between releases), and which of
+those are on its PATH. The `agent` enum is the union of the answers. So a fleet with
+Claude and Codex on one box and Pi and Devin on a laptop advertises four values, not
+twenty-one — the schema is paid for on every request forever, and listing agents nobody
+has installed buys nothing but tokens.
+
+The **per-host** matrix stays out of the schema entirely, because it is the single most
+expensive thing you could put there and it changes whenever you install something.
+Instead a wrong guess gets a refusal that carries the answer:
+
+```
+'devin' is not installed on xl. Available there: claude, codex
+herdr on xl cannot start 'dsh'. It supports: agy, amp, claude, cline, codex, …
+```
+
+Two different problems, said differently — one is a missing binary, the other is an
+agent this herdr has never heard of.
+
+A host that was asleep at startup comes back as *unknown* rather than *empty*, and
+unknown permits everything: a closed laptop must not have its agents hidden until the
+next restart. The spawn goes through and the real error comes back from the real attempt.
+
+**Only Claude Code returns a link.** Nothing else has a claude.ai bridge — no session
+registry, no `bridgeSessionId`, nothing to link to. Other agents return
+`continue_with: "herdr agent prompt <session_name>"` rather than a null `remote_url`
+that reads like a failure, and the RC poll is skipped entirely rather than burning 15
+seconds reaching a foregone conclusion.
+
+Per-agent quirks live in `agents.py`, and there are only three that matter: the launch
+flags (Claude's `--dangerously-skip-permissions` is Codex's
+`--dangerously-bypass-approvals-and-sandbox`; an agent with no profile gets **no**
+flags rather than someone else's dangerous one), where each keeps its trust store
+(`~/.claude.json` vs `~/.codex/config.toml`, same parent-walking lookup), and whether it
+has Remote Control. Adding an agent is a few lines there; an agent with no profile at
+all still starts fine.
+
 ### Remote hosts, over ssh
 
 A `transport = "ssh"` host runs the herdr CLI on the far side. There is no socket
@@ -119,7 +165,7 @@ The settings that matter:
 | `cwd_allowlist` | **The** blast-radius control. A spawn's cwd must resolve under one of these roots — fully resolved, so `…/scratch-evil` does not pass a `…/scratch` root and symlinks cannot walk out. |
 | `default_cwd` | Where a spawn lands when the caller names no cwd. Must itself be under `cwd_allowlist`; a misconfigured one is refused, not trusted. A host without it refuses any spawn that names no cwd. |
 | `protected_workspaces` | Never closed, never spawned into. |
-| `skip_permissions` | Per-host only, never a tool parameter. An unattended agent with permissions skipped, started from a chat message, is the one combination that can quietly do real damage. |
+| `skip_permissions` | Per-host only, never a tool parameter. An unattended agent with permissions skipped, started from a chat message, is the one combination that can quietly do real damage. Applied with each agent's own flag, and not at all for agents whose flag isn't known. |
 
 See [`config.toml.example`](config.toml.example) for the full annotated set.
 
@@ -319,6 +365,21 @@ fails below ~123 columns, where Ink hard-breaks the line. The registry read has 
 race, no regex, and no width dependence — but it is undocumented internals, so every
 spawn records the observed Claude Code `version` and the resolver warns when it changes.
 
+**"Ready" does not mean "working", and no preflight can fix it.** A spawned Codex
+reported `interactive_ready: true`, then `idle`, then `done` — and was entirely
+non-functional: *"Your access token could not be refreshed."* Worse, `codex login
+status` cheerfully answered **"Logged in using ChatGPT"** while the stored token was
+five weeks stale and failing to refresh. So an auth preflight built on each agent's own
+status command would confidently report health that does not exist. With one daily-driver
+agent stale credentials are rare; across several agents on several machines they are the
+*normal* failure. The honest answer is that the pane tail is the only ground truth, which
+is why every non-clean outcome returns one.
+
+**Agents update themselves and exit.** A first-run Codex printed *"Update ran
+successfully! Please restart Codex"* and quit — after `agent start` had already reported
+it ready. The retry succeeded. Nothing here can prevent that; it is worth knowing that a
+spawn's first attempt on a long-idle host may land on an empty shell.
+
 **The pane's Claude process is not `foreground_processes[0]`.** Claude spawns children —
 `caffeinate`, one process per configured MCP server — and they sort ahead of it: on a
 real pane it came back *last of seven*, behind `caffeinate`. Reading the session
@@ -371,6 +432,7 @@ it logs and serves the verbose schema instead.
 ```
 src/herdr_spawn/
   config.py   host registry, cwd allowlist, path-traversal-safe resolution
+  agents.py   per-agent launch flags and trust stores; per-host availability discovery
   herdr.py    CLI wrapper; the three return conventions
   rc.py       Remote Control id resolution (registry poll, pid+procStart join)
   state.py    append-only JSONL + teardown guard

@@ -32,6 +32,10 @@ home = "/home/you"
 # Spawned tabs land in a workspace with this label, created on first use.
 inbox_label = "inbox"
 
+# Which coding agents this host can run is NOT declared here -- it is discovered at
+# startup by asking herdr what kinds it supports and checking which are on PATH.
+# Install one and restart the service; nothing to edit.
+
 # THE blast-radius control. A spawn's cwd must resolve under one of these roots.
 # Keep it to a sandbox you would not mind an unattended agent working in.
 cwd_allowlist = ["/home/you/scratch"]

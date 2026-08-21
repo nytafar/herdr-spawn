@@ -16,6 +16,8 @@ import os
 import re
 import shlex
 import sys
+import tomllib
+from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 from typing import Annotated, Any
@@ -25,6 +27,8 @@ from pydantic import Field
 
 from . import config as cfg
 from . import rc as rcmod
+from .agents import DEFAULT_AGENT, AgentProfile, HostAgents, advertised, discover
+from .agents import profile as agent_profile
 from .config import AGENT_START_TIMEOUT_DEFAULT, Config, ConfigError, HostConfig
 from .herdr import (
     ERR_NAME_TAKEN,
@@ -79,27 +83,32 @@ def coerce_session_name(raw: str | None, prompt: str, label: str | None) -> str:
     return candidate
 
 
-def cwd_is_trusted(claude_config: Path, cwd: Path) -> tuple[bool, str]:
-    """Has this directory been through Claude's trust dialog?"""
+def cwd_is_trusted(store: Path, cwd: Path, scheme: str = "claude") -> tuple[bool, str]:
+    """Has this directory been through the agent's trust prompt?"""
     try:
-        text = claude_config.read_text()
+        text = store.read_text()
     except OSError as exc:
-        return False, f"could not read {claude_config}: {exc}"
-    return trust_from_config(text, cwd, source=str(claude_config))
+        return False, f"could not read {store}: {exc}"
+    return trust_from_config(text, cwd, source=str(store), scheme=scheme)
 
 
-def trust_from_config(text: str, cwd: Path, *, source: str) -> tuple[bool, str]:
-    """The trust check itself, over the config's contents.
+def trust_from_config(text: str, cwd: Path, *, source: str, scheme: str = "claude") -> tuple[bool, str]:
+    """The trust check itself, over the store's contents.
 
-    Split from the file read so the ssh path can hand over what it fetched.
+    Split from the file read so the ssh path can hand over what it fetched, and
+    from the format so a second agent can reuse the walk.
 
-    Claude Code does not do an exact-key lookup -- it walks parent directories, so
-    a trusted parent covers its children. Checking only the exact key would refuse
-    spawns that would actually have worked fine.
+    Two stores, same shape: Claude keeps `projects.<path>.hasTrustDialogAccepted`
+    in `~/.claude.json`, Codex keeps `projects.<path>.trust_level = "trusted"` in
+    `~/.codex/config.toml`.
+
+    Neither is looked up by exact key -- the walk goes up through the parents, so a
+    trusted parent covers its children. Checking only the exact key would refuse
+    spawns that would have worked fine.
     """
     try:
-        data = json.loads(text)
-    except json.JSONDecodeError as exc:
+        data = json.loads(text) if scheme == "claude" else tomllib.loads(text)
+    except (json.JSONDecodeError, tomllib.TOMLDecodeError) as exc:
         return False, f"could not read {source}: {exc}"
 
     projects = data.get("projects")
@@ -108,13 +117,30 @@ def trust_from_config(text: str, cwd: Path, *, source: str) -> tuple[bool, str]:
 
     for candidate in [cwd, *cwd.parents]:
         entry = projects.get(str(candidate))
-        if isinstance(entry, dict) and entry.get("hasTrustDialogAccepted"):
+        if not isinstance(entry, dict):
+            continue
+        trusted = (
+            entry.get("hasTrustDialogAccepted")
+            if scheme == "claude"
+            else entry.get("trust_level") == "trusted"
+        )
+        if trusted:
             return True, str(candidate)
     return False, (
-        f"{cwd} is not trusted by Claude Code (no parent up to / has "
-        "hasTrustDialogAccepted). Start Claude there once by hand and accept the "
-        "trust dialog, otherwise the spawned pane just sits on that dialog."
+        f"{cwd} is not trusted for {scheme} (no parent up to / is marked trusted in "
+        f"{source}). Start it there once by hand and accept the trust prompt, "
+        "otherwise the spawned pane just sits on that dialog."
     )
+
+
+# Where each trust scheme keeps its store, relative to the host's home.
+TRUST_STORES = {"claude": ".claude.json", "codex": ".codex/config.toml"}
+
+
+def trust_store(host: HostConfig, scheme: str) -> str:
+    if scheme == "claude":
+        return host.claude_config  # configurable; the others are conventional
+    return str(Path(host.home) / TRUST_STORES[scheme])
 
 
 async def _find_inbox(h: Herdr, label: str) -> dict[str, Any] | None:
@@ -126,11 +152,14 @@ async def _find_inbox(h: Herdr, label: str) -> dict[str, Any] | None:
     return sorted(matches, key=lambda w: str(w.get("workspace_id")))[0]
 
 
-async def _preflight(host: HostConfig, h: Herdr, cwd: Path) -> None:
+async def _preflight(host: HostConfig, h: Herdr, cwd: Path, prof: AgentProfile) -> None:
     """Everything that must be true before we create anything at all.
 
     Ordering matters: a failure after a tab exists leaves an orphaned pane sitting
     on a dialog, which is worse than a clean refusal.
+
+    An agent with no known trust store still gets the cwd existence check; we just
+    cannot pre-empt its trust prompt, so the pane tail is the only warning.
     """
     try:
         await h.probe()
@@ -144,11 +173,13 @@ async def _preflight(host: HostConfig, h: Herdr, cwd: Path) -> None:
             raise ConfigError(f"cwd {cwd} does not exist on {host.name}")
         if not cwd.is_dir():
             raise ConfigError(f"cwd {cwd} is not a directory on {host.name}")
-        ok, detail = cwd_is_trusted(Path(host.claude_config), cwd)
-        if not ok:
-            raise ConfigError(detail)
+        if prof.trust:
+            store = trust_store(host, prof.trust)
+            ok, detail = cwd_is_trusted(Path(store), cwd, scheme=prof.trust)
+            if not ok:
+                raise ConfigError(detail)
     else:
-        await _preflight_remote(host, h, cwd)
+        await _preflight_remote(host, h, cwd, prof)
 
 
 # One round trip for both checks. The `__NO_CWD__` marker rather than a non-zero
@@ -157,18 +188,20 @@ async def _preflight(host: HostConfig, h: Herdr, cwd: Path) -> None:
 _REMOTE_PREFLIGHT = r"""
 set -u
 test -d {cwd} || {{ echo __NO_CWD__; exit 0; }}
-cat {claude_config} 2>/dev/null || echo __NO_CONFIG__
+test -n {trust_store} || exit 0
+cat {trust_store} 2>/dev/null || echo __NO_STORE__
 """
 
 
-async def _preflight_remote(host: HostConfig, h: Herdr, cwd: Path) -> None:
+async def _preflight_remote(host: HostConfig, h: Herdr, cwd: Path, prof: AgentProfile) -> None:
     """The same cwd and trust checks, on the far side of an ssh connection.
 
     Worth the round trip: an untrusted cwd does not fail, it hangs -- the pane
     opens and then sits on the trust dialog forever, looking alive.
     """
+    store = trust_store(host, prof.trust) if prof.trust else ""
     script = _REMOTE_PREFLIGHT.format(
-        cwd=shlex.quote(str(cwd)), claude_config=shlex.quote(host.claude_config)
+        cwd=shlex.quote(str(cwd)), trust_store=shlex.quote(store)
     )
     try:
         out = await h.sh(script, timeout=30)
@@ -177,11 +210,15 @@ async def _preflight_remote(host: HostConfig, h: Herdr, cwd: Path) -> None:
 
     if out.startswith("__NO_CWD__"):
         raise ConfigError(f"cwd {cwd} does not exist on {host.name}")
-    if out.startswith("__NO_CONFIG__"):
+    if not prof.trust:
+        return
+    if out.startswith("__NO_STORE__"):
         raise ConfigError(
-            f"could not read {host.claude_config} on {host.name} — has Claude Code ever run there?"
+            f"could not read {store} on {host.name} — has {prof.kind} ever run there?"
         )
-    ok, detail = trust_from_config(out, cwd, source=f"{host.claude_config} on {host.name}")
+    ok, detail = trust_from_config(
+        out, cwd, source=f"{store} on {host.name}", scheme=prof.trust
+    )
     if not ok:
         raise ConfigError(detail)
 
@@ -209,19 +246,28 @@ def claude_pid(process_info: dict[str, Any]) -> int | None:
     return procs[0].get("pid") if procs else None
 
 
-def _agent_args(host: HostConfig, session_name: str) -> list[str]:
-    """Args passed verbatim to the claude binary after `--`.
+def _agent_args(host: HostConfig, prof: AgentProfile, session_name: str) -> list[str]:
+    """Args passed verbatim to the agent binary after `--`.
 
     Built as a list, never a shell string: passthrough is execve-style and a spaced
     argument must survive as a single argv element.
+
+    Per agent, because these flags are not interchangeable -- Claude's
+    `--dangerously-skip-permissions` is Codex's
+    `--dangerously-bypass-approvals-and-sandbox`, and an agent with no profile gets
+    no flags at all rather than someone else's.
     """
-    args = ["--remote-control", session_name]
+    args: list[str] = []
+    if prof.remote_control:
+        args += ["--remote-control", session_name]
     # Never a tool parameter. An unattended agent with permissions skipped, started
     # from a chat message, is the one combination that can quietly do real damage.
-    if host.skip_permissions:
-        args.append("--dangerously-skip-permissions")
-    if host.sandbox:
-        args.append("--sandbox")
+    # A host that asks for it against an agent whose flag we do not know gets
+    # nothing, rather than a guess.
+    if host.skip_permissions and prof.skip_permissions_flag:
+        args.append(prof.skip_permissions_flag)
+    if host.sandbox and prof.sandbox_flag:
+        args.append(prof.sandbox_flag)
     return args
 
 
@@ -256,10 +302,12 @@ async def spawn(
     host_name: str,
     prompt: str,
     cwd_raw: str | None,
+    agent: str = DEFAULT_AGENT,
     label: str | None = None,
     session_name_raw: str | None = None,
     workspace_override: str | None = None,
     wait: bool = False,
+    capabilities: dict[str, HostAgents] | None = None,
 ) -> dict[str, Any]:
     host = conf.host(host_name)
     h = Herdr(host)
@@ -268,11 +316,20 @@ async def spawn(
     if not prompt or not prompt.strip():
         raise ConfigError("prompt is required and cannot be empty")
 
+    agent = (agent or DEFAULT_AGENT).strip().lower()
+    caps = (capabilities or {}).get(host_name)
+    # The refusal carries the answer rather than just the complaint: a caller that
+    # guessed wrong gets that host's actual list back and can retry immediately,
+    # which is why the per-host matrix does not need to be in the tool schema.
+    if caps and not caps.permits(agent):
+        raise ConfigError(caps.refusal(agent, host_name))
+
+    prof = agent_profile(agent)
     cwd = host.resolve_cwd(cwd_raw)
     session_name = coerce_session_name(session_name_raw, prompt, label)
     tab_label = label or session_name
 
-    await _preflight(host, h, cwd)
+    await _preflight(host, h, cwd, prof)
 
     # --- create the landing place ------------------------------------------
     workspace_id: str
@@ -308,6 +365,7 @@ async def spawn(
     partial = {
         "status": "failed",
         "host": host.name,
+        "agent": agent,
         "session_name": session_name,
         "workspace_id": workspace_id,
         "tab_id": tab_id,
@@ -316,20 +374,22 @@ async def spawn(
     }
 
     try:
-        agent = await h.agent_start(
+        started = await h.agent_start(
             session_name,
             pane_id,
-            _agent_args(host, session_name),
+            _agent_args(host, prof, session_name),
+            kind=agent,
             timeout_ms=AGENT_START_TIMEOUT_DEFAULT,
         )
     except HerdrError as exc:
         if exc.code == ERR_NAME_TAKEN:
             session_name = f"{session_name[:28]}-{os.urandom(2).hex()}"
             try:
-                agent = await h.agent_start(
+                started = await h.agent_start(
                     session_name,
                     pane_id,
-                    _agent_args(host, session_name),
+                    _agent_args(host, prof, session_name),
+                    kind=agent,
                     timeout_ms=AGENT_START_TIMEOUT_DEFAULT,
                 )
             except HerdrError as exc2:
@@ -343,40 +403,46 @@ async def spawn(
             partial |= {"reason": f"{exc.code}: {exc.message}", "pane_tail": tail}
             return partial
 
-    session_id = (agent.get("agent_session") or {}).get("value")
-    argv = agent.get("_argv")
+    session_id = (started.get("agent_session") or {}).get("value")
+    argv = started.get("_argv")
 
     # --- resolve the Remote Control handle ---------------------------------
-    pid = None
-    try:
-        pid = claude_pid(await h.pane_process_info(pane_id))
-    except HerdrError:
-        pass
-
+    # Claude Code only. Nothing else has a claude.ai bridge, so for every other
+    # agent there is no session registry to poll and no link to hand back -- and
+    # polling one anyway would just burn 15s reaching a foregone conclusion.
     remote = rcmod.RemoteControl(
-        session_id=session_id, bridge_session_id=None, url=None, pid=pid,
+        session_id=session_id, bridge_session_id=None, url=None, pid=None,
         proc_start=None, version=None, available=False,
-        reason="pid could not be resolved from the pane",
+        reason=f"{agent} has no Remote Control bridge; continue in the pane",
     )
-    if pid and host.transport == "socket":
-        remote = await rcmod.resolve(
-            sessions_dir=Path(host.claude_sessions_dir),
-            pid=pid,
-            expected_session_id=session_id,
-            cwd=str(cwd),
-        )
-    elif pid:
-        remote = await rcmod.resolve_remote(
-            sh=h.sh,
-            sessions_dir=Path(host.claude_sessions_dir),
-            pid=pid,
-            expected_session_id=session_id,
-            cwd=str(cwd),
-        )
+    if prof.remote_control:
+        pid = None
+        try:
+            pid = claude_pid(await h.pane_process_info(pane_id))
+        except HerdrError:
+            pass
+        if not pid:
+            remote = replace(remote, reason="pid could not be resolved from the pane")
+        elif host.transport == "socket":
+            remote = await rcmod.resolve(
+                sessions_dir=Path(host.claude_sessions_dir),
+                pid=pid,
+                expected_session_id=session_id,
+                cwd=str(cwd),
+            )
+        else:
+            remote = await rcmod.resolve_remote(
+                sh=h.sh,
+                sessions_dir=Path(host.claude_sessions_dir),
+                pid=pid,
+                expected_session_id=session_id,
+                cwd=str(cwd),
+            )
 
     record = SpawnRecord(
         session_name=session_name,
         host=host.name,
+        agent=agent,
         workspace_id=workspace_id,
         tab_id=tab_id,
         pane_id=pane_id,
@@ -414,19 +480,25 @@ async def spawn(
     result = {
         "status": "spawned",
         "host": host.name,
+        "agent": agent,
         "session_name": session_name,
         "workspace_id": workspace_id,
         "tab_id": tab_id,
         "pane_id": pane_id,
         "cwd": str(cwd),
         "session_id": record.session_id,
-        "remote_url": remote.url,
-        "agent_status": agent.get("agent_status"),
+        "agent_status": started.get("agent_status"),
     }
+    if prof.remote_control:
+        result["remote_url"] = remote.url
+        if not remote.available:
+            result["rc_unavailable"] = remote.reason
+    else:
+        # Say it once, plainly, rather than returning a null `remote_url` that reads
+        # like a failure. `herdr agent prompt <session_name>` is how you continue.
+        result["continue_with"] = f"herdr agent prompt {session_name}"
     if handoff_file:
         result["handoff_file"] = str(handoff_file)
-    if not remote.available:
-        result["rc_unavailable"] = remote.reason
 
     async with _pane_lock(host.name, pane_id):
         try:
@@ -467,8 +539,9 @@ async def spawn(
 # --- MCP wiring ------------------------------------------------------------
 
 
-def build_server(conf: Config) -> MCPServer:
+def build_server(conf: Config, capabilities: dict[str, HostAgents] | None = None) -> MCPServer:
     server = MCPServer(name="herdr-spawn")
+    caps = capabilities or {}
 
     # This server is enabled in every chat and every Claude Code session, so its
     # tool definition is paid for on every request whether or not it gets used.
@@ -476,9 +549,10 @@ def build_server(conf: Config) -> MCPServer:
     # would otherwise cause a refused call, and `prompt` sets the quality bar.
     # The rest are self-evident from their names and are left undescribed.
     @server.tool(structured_output=False)
-    async def spawn_claude(
+    async def spawn_agent(
         host: str,
         prompt: Annotated[str, Field(description="Full handoff brief: task, constraints, what done looks like.")],
+        agent: str = DEFAULT_AGENT,
         cwd: Annotated[
             str | None,
             Field(description="Absolute path under an allowed root. Omit to use the host's default sandbox."),
@@ -488,9 +562,10 @@ def build_server(conf: Config) -> MCPServer:
         workspace: str | None = None,
         wait: bool = False,
     ) -> str:
-        """Start a Claude Code session on one of the configured hosts and hand it a prompt.
+        """Start a coding agent on one of the configured hosts and hand it a prompt.
 
-        Returns a claude.ai/code link to continue it from the Code tab.
+        claude returns a claude.ai/code link to continue from the Code tab; other
+        agents run in a herdr pane and are continued there.
         """
         try:
             result = await spawn(
@@ -498,39 +573,45 @@ def build_server(conf: Config) -> MCPServer:
                 host_name=host,
                 prompt=prompt,
                 cwd_raw=cwd,
+                agent=agent,
                 label=label,
                 session_name_raw=session_name,
                 workspace_override=workspace,
                 wait=wait,
+                capabilities=caps,
             )
         except (ConfigError, TeardownGuard) as exc:
             result = {"status": "refused", "reason": str(exc)}
         except HerdrError as exc:
             result = {"status": "failed", "reason": f"{exc.code}: {exc.message}"}
-        log.info("spawn_claude host=%s -> %s", host, result.get("status"))
+        log.info("spawn_agent host=%s agent=%s -> %s", host, agent, result.get("status"))
         return json.dumps(result, indent=2)
 
-    _advertise_hosts(server, conf.host_names)
+    _advertise_enum(server, "host", conf.host_names)
+    _advertise_enum(server, "agent", advertised(caps, conf.host_names))
     _slim_advertised_schema(server)
     return server
 
 
-def _advertise_hosts(server: MCPServer, hosts: list[str]) -> None:
-    """Publish the configured host names as the `host` enum.
+def _advertise_enum(server: MCPServer, param: str, values: list[str]) -> None:
+    """Publish a discovered set as a parameter's enum.
 
-    They come from config rather than a `Literal` in the signature so that no
-    particular deployment's machine names live in this source file. Hosts that
-    are *disabled* are advertised too, deliberately: a structured refusal naming
-    the missing prerequisite tells a calling model far more than the value simply
-    not existing.
+    Neither list is a `Literal` in the signature, so no deployment's machine names
+    or installed software live in this source file. Both are what the schema is
+    *for*: telling a calling model the small set of values that can work.
+
+    Hosts that are disabled are advertised anyway -- a structured refusal naming
+    the missing prerequisite says far more than the value not existing. Agents that
+    are not installed anywhere are NOT advertised, because that costs tokens on
+    every request forever to describe something that can only ever be refused.
     """
     try:
         for tool in server._tool_manager._tools.values():  # noqa: SLF001
-            prop = tool.parameters.get("properties", {}).get("host")
-            if isinstance(prop, dict):
-                prop["enum"] = hosts
+            prop = tool.parameters.get("properties", {}).get(param)
+            if isinstance(prop, dict) and values:
+                prop["enum"] = values
     except (AttributeError, TypeError) as exc:  # pragma: no cover - defensive
-        log.warning("could not advertise host enum (%s); host stays a free string", exc)
+        log.warning("could not advertise %s enum (%s); it stays a free string", param, exc)
 
 
 def _slim_schema(node: Any) -> Any:
@@ -582,11 +663,33 @@ def _configure_logging() -> None:
     )
 
 
+async def discover_all(conf: Config) -> dict[str, HostAgents]:
+    """Ask every enabled host what it can start, concurrently.
+
+    Once, at startup. Two round trips per host is nothing here and unaffordable per
+    request -- and a host that is asleep just comes back `error`, which permits
+    everything rather than hiding its agents until the next restart.
+    """
+    names = [n for n in conf.host_names if conf.hosts[n].enabled]
+    results = await asyncio.gather(
+        *(discover(Herdr(conf.hosts[n])) for n in names), return_exceptions=True
+    )
+    out: dict[str, HostAgents] = {}
+    for name, res in zip(names, results, strict=True):
+        if isinstance(res, BaseException):
+            out[name] = HostAgents(error=f"discovery raised {res!r}")
+            log.warning("agent discovery failed on %s: %r", name, res)
+        else:
+            out[name] = res
+    return out
+
+
 def main() -> None:
     """Entry point. Transport is chosen by config/env, not by the tool surface."""
     _configure_logging()
     conf = cfg.load(os.environ.get("HERDR_SPAWN_CONFIG"))
-    server = build_server(conf)
+    caps = asyncio.run(discover_all(conf))
+    server = build_server(conf, caps)
 
     transport = os.environ.get("HERDR_SPAWN_TRANSPORT", "stdio")
     if transport == "stdio":

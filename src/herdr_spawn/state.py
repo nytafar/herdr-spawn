@@ -30,11 +30,12 @@ def _now() -> str:
 class SpawnRecord:
     session_name: str
     host: str
-    workspace_id: str
-    tab_id: str
-    pane_id: str
-    cwd: str
-    label: str
+    agent: str = "claude"
+    workspace_id: str = ""
+    tab_id: str = ""
+    pane_id: str = ""
+    cwd: str = ""
+    label: str = ""
     created_at: str = field(default_factory=_now)
     pid: int | None = None
     proc_start: str | None = None

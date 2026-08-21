@@ -10,11 +10,18 @@ from pathlib import Path
 
 import pytest
 
+from herdr_spawn import agents
 from herdr_spawn import config as cfg
 from herdr_spawn import rc as rcmod
 from herdr_spawn.config import ConfigError, HostConfig
 from herdr_spawn.herdr import Herdr, HerdrError
-from herdr_spawn.server import claude_pid, coerce_session_name, cwd_is_trusted
+from herdr_spawn.server import (
+    _agent_args,
+    claude_pid,
+    coerce_session_name,
+    cwd_is_trusted,
+    trust_from_config,
+)
 from herdr_spawn.state import SpawnRecord, Store, TeardownGuard, assert_closable
 
 
@@ -430,26 +437,135 @@ def test_remote_preflight_distinguishes_missing_cwd_from_untrusted(tmp_path):
     from herdr_spawn.server import _preflight_remote
 
     h = Herdr(ssh_host(tmp_path))
+    claude = agents.profile("claude")
 
     async def missing(script, timeout=None):
         return "__NO_CWD__\n"
 
     h.sh = missing  # type: ignore[method-assign]
     with pytest.raises(ConfigError, match="does not exist"):
-        asyncio.run(_preflight_remote(h.host, h, Path("/Users/me/scratch")))
+        asyncio.run(_preflight_remote(h.host, h, Path("/Users/me/scratch"), claude))
 
     async def untrusted(script, timeout=None):
         return json.dumps({"projects": {"/Users/me/other": {"hasTrustDialogAccepted": True}}})
 
     h.sh = untrusted  # type: ignore[method-assign]
-    with pytest.raises(ConfigError, match="not trusted by Claude Code"):
-        asyncio.run(_preflight_remote(h.host, h, Path("/Users/me/scratch")))
+    with pytest.raises(ConfigError, match="not trusted"):
+        asyncio.run(_preflight_remote(h.host, h, Path("/Users/me/scratch"), claude))
 
     async def trusted(script, timeout=None):
         return json.dumps({"projects": {"/Users/me": {"hasTrustDialogAccepted": True}}})
 
     h.sh = trusted  # type: ignore[method-assign]
-    asyncio.run(_preflight_remote(h.host, h, Path("/Users/me/scratch")))  # parent trust covers it
+    asyncio.run(_preflight_remote(h.host, h, Path("/Users/me/scratch"), claude))  # parent trust covers it
+
+
+def test_remote_preflight_skips_trust_for_an_agent_with_no_store(tmp_path):
+    """An agent we have no profile for is still startable -- we just cannot
+    pre-empt its trust prompt, so the cwd check runs and nothing else."""
+    from herdr_spawn.server import _preflight_remote
+
+    h = Herdr(ssh_host(tmp_path))
+    seen = {}
+
+    async def sh(script, timeout=None):
+        seen["script"] = script
+        return ""
+
+    h.sh = sh  # type: ignore[method-assign]
+    asyncio.run(_preflight_remote(h.host, h, Path("/Users/me/scratch"), agents.profile("opencode")))
+    assert "__NO_CWD__" in seen["script"]  # cwd still checked
+    assert "test -n ''" in seen["script"]  # ...and the trust read short-circuits
+
+
+# --- agent profiles --------------------------------------------------------
+
+
+def test_only_claude_gets_remote_control_args(tmp_path):
+    """--remote-control is Claude's flag. Passing it to codex is an instant crash,
+    and codex has no bridge to advertise anyway."""
+    h = host(tmp_path)
+    assert _agent_args(h, agents.profile("claude"), "s1") == ["--remote-control", "s1"]
+    assert _agent_args(h, agents.profile("codex"), "s1") == []
+    assert _agent_args(h, agents.profile("opencode"), "s1") == []
+
+
+def test_skip_permissions_uses_each_agents_own_flag(tmp_path):
+    """These are not interchangeable, and an agent whose flag we do not know gets
+    NOTHING rather than someone else's dangerous flag."""
+    h = host(tmp_path, skip_permissions=True)
+    assert "--dangerously-skip-permissions" in _agent_args(h, agents.profile("claude"), "s")
+    assert "--dangerously-bypass-approvals-and-sandbox" in _agent_args(h, agents.profile("codex"), "s")
+    assert _agent_args(h, agents.profile("opencode"), "s") == []
+
+
+def test_codex_trust_is_toml_and_walks_parents():
+    toml = '[projects."/Users/me"]\ntrust_level = "trusted"\n'
+    ok, via = trust_from_config(toml, Path("/Users/me/scratch/x"), source="cfg", scheme="codex")
+    assert ok and via == "/Users/me"
+    untrusted = '[projects."/Users/me"]\ntrust_level = "untrusted"\n'
+    ok, _ = trust_from_config(untrusted, Path("/Users/me/scratch"), source="cfg", scheme="codex")
+    assert not ok
+
+
+# --- discovery and the advertised enum -------------------------------------
+
+
+def test_kind_enum_is_parsed_from_herdr_help():
+    """Hardcoding this list goes stale: 0.8.2 added a kind 0.8.0 did not have."""
+    helptext = (
+        "      --kind <KIND>\n          Supported agent kind and canonical executable\n"
+        "          \n          [possible values: pi, claude, codex, opencode, maki]\n"
+    )
+    m = agents.KIND_ENUM_RE.search(helptext)
+    assert [k.strip() for k in m.group(1).split(",")] == ["pi", "claude", "codex", "opencode", "maki"]
+
+
+def test_sweep_ends_with_exit_zero(tmp_path):
+    """A `for` loop's status is its LAST command, so a sweep whose final kind is
+    absent exits 127 and the whole probe reads as a broken shell."""
+    async def run_text(args, timeout=None):
+        return "[possible values: claude, codex, maki]"
+
+    async def sh(script, timeout=None):
+        assert script.rstrip().endswith("exit 0")
+        return "claude\n"
+
+    h = Herdr(host(tmp_path))
+    h.run_text, h.sh = run_text, sh  # type: ignore[method-assign]
+    caps = asyncio.run(agents.discover(h))
+    assert caps.available == ("claude",)
+    assert caps.kinds == ("claude", "codex", "maki")
+
+
+def test_undiscovered_host_permits_everything():
+    """A laptop that was closed at startup must not have its agents hidden until
+    the next restart -- let the spawn through and return the real error."""
+    unknown = agents.HostAgents(error="ssh down")
+    assert unknown.permits("codex") and unknown.permits("anything")
+    known = agents.HostAgents(kinds=("claude", "codex"), installed=("claude",), available=("claude",))
+    assert known.permits("claude") and not known.permits("codex")
+
+
+def test_refusal_names_what_is_actually_available():
+    """The refusal carries the answer, which is why the per-host matrix does not
+    need to be in the schema."""
+    caps = agents.HostAgents(kinds=("claude", "codex", "pi"), installed=("claude", "pi"),
+                             available=("claude", "pi"))
+    assert "Available there: claude, pi" in caps.refusal("codex", "mac")
+    # A kind this herdr cannot drive at all is a different problem, said differently.
+    assert "cannot start 'dsh'" in caps.refusal("dsh", "mac")
+
+
+def test_advertised_enum_is_the_union_of_enabled_hosts_only():
+    caps = {
+        "xl": agents.HostAgents(kinds=("claude", "codex"), available=("claude", "codex")),
+        "mac": agents.HostAgents(kinds=("claude", "pi"), available=("claude", "pi")),
+        "off": agents.HostAgents(kinds=("droid",), available=("droid",)),
+    }
+    assert agents.advertised(caps, ["xl", "mac"]) == ["claude", "codex", "pi"]
+    # claude survives even when nothing was discovered: it is the default.
+    assert agents.advertised({}, ["xl"]) == ["claude"]
 
 
 # --- state + teardown guard ------------------------------------------------
