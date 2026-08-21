@@ -8,11 +8,13 @@ or not it gets used. Anything that can live in config instead of the schema, doe
 from __future__ import annotations
 
 import asyncio
+import base64
 import hashlib
 import json
 import logging
 import os
 import re
+import shlex
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -78,20 +80,31 @@ def coerce_session_name(raw: str | None, prompt: str, label: str | None) -> str:
 
 
 def cwd_is_trusted(claude_config: Path, cwd: Path) -> tuple[bool, str]:
-    """Has this directory been through Claude's trust dialog?
+    """Has this directory been through Claude's trust dialog?"""
+    try:
+        text = claude_config.read_text()
+    except OSError as exc:
+        return False, f"could not read {claude_config}: {exc}"
+    return trust_from_config(text, cwd, source=str(claude_config))
+
+
+def trust_from_config(text: str, cwd: Path, *, source: str) -> tuple[bool, str]:
+    """The trust check itself, over the config's contents.
+
+    Split from the file read so the ssh path can hand over what it fetched.
 
     Claude Code does not do an exact-key lookup -- it walks parent directories, so
     a trusted parent covers its children. Checking only the exact key would refuse
     spawns that would actually have worked fine.
     """
     try:
-        data = json.loads(claude_config.read_text())
-    except (OSError, json.JSONDecodeError) as exc:
-        return False, f"could not read {claude_config}: {exc}"
+        data = json.loads(text)
+    except json.JSONDecodeError as exc:
+        return False, f"could not read {source}: {exc}"
 
     projects = data.get("projects")
     if not isinstance(projects, dict):
-        return False, f"{claude_config} has no projects map"
+        return False, f"{source} has no projects map"
 
     for candidate in [cwd, *cwd.parents]:
         entry = projects.get(str(candidate))
@@ -134,6 +147,66 @@ async def _preflight(host: HostConfig, h: Herdr, cwd: Path) -> None:
         ok, detail = cwd_is_trusted(Path(host.claude_config), cwd)
         if not ok:
             raise ConfigError(detail)
+    else:
+        await _preflight_remote(host, h, cwd)
+
+
+# One round trip for both checks. The `__NO_CWD__` marker rather than a non-zero
+# exit because the exits here belong to ssh, and conflating "the directory is
+# missing" with "the connection failed" costs an afternoon.
+_REMOTE_PREFLIGHT = r"""
+set -u
+test -d {cwd} || {{ echo __NO_CWD__; exit 0; }}
+cat {claude_config} 2>/dev/null || echo __NO_CONFIG__
+"""
+
+
+async def _preflight_remote(host: HostConfig, h: Herdr, cwd: Path) -> None:
+    """The same cwd and trust checks, on the far side of an ssh connection.
+
+    Worth the round trip: an untrusted cwd does not fail, it hangs -- the pane
+    opens and then sits on the trust dialog forever, looking alive.
+    """
+    script = _REMOTE_PREFLIGHT.format(
+        cwd=shlex.quote(str(cwd)), claude_config=shlex.quote(host.claude_config)
+    )
+    try:
+        out = await h.sh(script, timeout=30)
+    except HerdrError as exc:
+        raise ConfigError(f"could not preflight {host.name} over ssh: {exc.message}") from exc
+
+    if out.startswith("__NO_CWD__"):
+        raise ConfigError(f"cwd {cwd} does not exist on {host.name}")
+    if out.startswith("__NO_CONFIG__"):
+        raise ConfigError(
+            f"could not read {host.claude_config} on {host.name} — has Claude Code ever run there?"
+        )
+    ok, detail = trust_from_config(out, cwd, source=f"{host.claude_config} on {host.name}")
+    if not ok:
+        raise ConfigError(detail)
+
+
+def claude_pid(process_info: dict[str, Any]) -> int | None:
+    """Pick the Claude Code process out of a pane's foreground set.
+
+    NOT `foreground_processes[0]`. Claude spawns children -- `caffeinate`, one
+    process per configured MCP server -- and they sort ahead of it: on a real
+    pane the parent came back *last* of seven. Reading the session registry for a
+    child's pid finds no record, so Remote Control reports itself unavailable on a
+    spawn whose bridge connected perfectly well.
+
+    The foreground process *group* id is the job leader, which is claude itself.
+    Match on `argv0` as a second opinion -- `name` is the version string, not a
+    name -- and keep the old behaviour as a last resort.
+    """
+    procs = process_info.get("foreground_processes") or []
+    leader = process_info.get("foreground_process_group_id")
+    if isinstance(leader, int) and leader > 0:
+        return leader
+    for p in procs:
+        if str(p.get("argv0") or "").endswith("claude"):
+            return p.get("pid")
+    return procs[0].get("pid") if procs else None
 
 
 def _agent_args(host: HostConfig, session_name: str) -> list[str]:
@@ -152,11 +225,28 @@ def _agent_args(host: HostConfig, session_name: str) -> list[str]:
     return args
 
 
-async def _write_prompt_file(cwd: Path, session_name: str, prompt: str) -> Path:
-    d = cwd / ".herdr-handoff"
-    d.mkdir(parents=True, exist_ok=True)
-    p = d / f"{session_name}.md"
-    p.write_text(prompt, encoding="utf-8")
+async def _write_prompt_file(host: HostConfig, h: Herdr, cwd: Path, session_name: str, prompt: str) -> Path:
+    """Drop the handoff brief where the agent will be running, not where we are.
+
+    For an ssh host that means writing it on the far side; `cwd` is a path in the
+    remote filesystem and creating it locally would silently produce a file nobody
+    reads, in a directory that may not even exist here.
+
+    The content goes over base64-encoded rather than in a heredoc: a prompt is
+    arbitrary prose and can contain any delimiter you might pick.
+    """
+    p = cwd / ".herdr-handoff" / f"{session_name}.md"
+    if host.transport == "socket":
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(prompt, encoding="utf-8")
+        return p
+
+    blob = base64.b64encode(prompt.encode("utf-8")).decode("ascii")
+    await h.sh(
+        f"set -eu\nmkdir -p {shlex.quote(str(p.parent))}\n"
+        f"printf %s {shlex.quote(blob)} | base64 -d > {shlex.quote(str(p))}",
+        timeout=30,
+    )
     return p
 
 
@@ -259,10 +349,7 @@ async def spawn(
     # --- resolve the Remote Control handle ---------------------------------
     pid = None
     try:
-        pinfo = await h.pane_process_info(pane_id)
-        procs = pinfo.get("foreground_processes") or []
-        if procs:
-            pid = procs[0].get("pid")
+        pid = claude_pid(await h.pane_process_info(pane_id))
     except HerdrError:
         pass
 
@@ -273,6 +360,14 @@ async def spawn(
     )
     if pid and host.transport == "socket":
         remote = await rcmod.resolve(
+            sessions_dir=Path(host.claude_sessions_dir),
+            pid=pid,
+            expected_session_id=session_id,
+            cwd=str(cwd),
+        )
+    elif pid:
+        remote = await rcmod.resolve_remote(
+            sh=h.sh,
             sessions_dir=Path(host.claude_sessions_dir),
             pid=pid,
             expected_session_id=session_id,
@@ -310,7 +405,7 @@ async def spawn(
     prompt_text = prompt
     handoff_file = None
     if len(prompt) > PROMPT_FILE_THRESHOLD:
-        handoff_file = await _write_prompt_file(cwd, session_name, prompt)
+        handoff_file = await _write_prompt_file(host, h, cwd, session_name, prompt)
         prompt_text = (
             f"Your handoff brief is at @{handoff_file.relative_to(cwd)} — read it first, "
             "then start on it."

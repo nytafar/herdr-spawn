@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import shlex
 from dataclasses import dataclass
 from typing import Any
 
@@ -55,14 +56,61 @@ class Herdr:
     def __init__(self, host: HostConfig):
         self.host = host
 
-    def _base_argv(self) -> list[str]:
-        if self.host.transport == "ssh":
-            # Remote hosts are driven by forwarding their herdr socket and running
-            # the LOCAL binary against it -- `herdr --remote` rejects subcommands
-            # outright, and a bare `herdr` is not on PATH over non-interactive ssh.
-            # The forward itself is set up out of band; here we just point at it.
-            return [self.host.herdr_bin]
-        return [self.host.herdr_bin]
+    def _ssh_prefix(self) -> list[str]:
+        argv = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10"]
+        if self.host.ssh_identity:
+            argv += ["-i", self.host.ssh_identity, "-o", "IdentitiesOnly=yes"]
+        return [*argv, str(self.host.ssh_target)]
+
+    def _argv(self, args: list[str]) -> list[str]:
+        """The full command line for one herdr call.
+
+        A local host execs the binary directly, so every argument survives verbatim.
+        A remote host goes through ssh, which hands its command to the remote *shell*
+        as a single string -- so that side is composed with `shlex.join` and the
+        quoting happens here rather than by luck. This matters most for
+        `agent prompt`, whose payload is arbitrary multi-line prose.
+
+        `herdr --remote` is not the tool for this: it rejects subcommands outright.
+        The remote binary is named by absolute path because a non-interactive ssh
+        PATH generally does not include it.
+        """
+        remote = [self.host.herdr_bin, *args]
+        if self.host.transport != "ssh":
+            return remote
+        if not self.host.ssh_target:
+            raise HerdrError(
+                code=ERR_UNAVAILABLE,
+                message=f"host {self.host.name!r} is transport=ssh but names no ssh_target",
+                argv=remote,
+                returncode=-1,
+            )
+        if self.host.ssh_socket_path:
+            remote = ["env", f"HERDR_SOCKET_PATH={self.host.ssh_socket_path}", *remote]
+        return [*self._ssh_prefix(), shlex.join(remote)]
+
+    async def sh(self, script: str, timeout: float = 30) -> str:
+        """Run a small shell snippet on the host and return stdout.
+
+        Only for the handful of reads that have no herdr verb -- does the cwd exist,
+        is it trusted, what is in the Claude session registry. Everything herdr can
+        answer goes through the CLI instead.
+
+        `script` is composed by this module, never from tool arguments.
+        """
+        argv = [*self._ssh_prefix(), script] if self.host.transport == "ssh" else ["/bin/sh", "-c", script]
+        proc = await asyncio.create_subprocess_exec(
+            *argv, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+        )
+        out_b, err_b = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+        if proc.returncode != 0:
+            raise HerdrError(
+                code=ERR_UNAVAILABLE if proc.returncode == 255 else "remote_shell_failed",
+                message=err_b.decode("utf-8", "replace").strip() or f"rc={proc.returncode}",
+                argv=argv,
+                returncode=proc.returncode or -1,
+            )
+        return out_b.decode("utf-8", "replace")
 
     async def run(self, args: list[str], timeout: float | None = None) -> dict[str, Any]:
         """Run a herdr subcommand and return the parsed JSON result.
@@ -70,7 +118,7 @@ class Herdr:
         `args` is always a list. Never build a shell string: the AGENT_ARGS
         passthrough depends on argv elements surviving verbatim, spaces included.
         """
-        argv = self._base_argv() + args
+        argv = self._argv(args)
         try:
             proc = await asyncio.create_subprocess_exec(
                 *argv,
@@ -79,9 +127,10 @@ class Herdr:
                 env=herdr_env(self.host),
             )
         except FileNotFoundError as exc:
+            missing = "ssh" if self.host.transport == "ssh" else self.host.herdr_bin
             raise HerdrError(
                 code=ERR_UNAVAILABLE,
-                message=f"herdr binary not found at {self.host.herdr_bin} on {self.host.name}",
+                message=f"{missing} not found while reaching {self.host.name}",
                 argv=argv,
                 returncode=-1,
             ) from exc
@@ -128,6 +177,19 @@ class Herdr:
         if "connection refused" in message.lower() or "server_not_running" in message:
             code = ERR_UNAVAILABLE
 
+        # ssh's own failures arrive as its exit codes, not herdr's: 255 is ssh
+        # itself giving up (auth, host key, unreachable) and 127 is the remote
+        # shell not finding herdr_bin. Reporting either as a generic herdr failure
+        # sends you looking at a herdr server that was never contacted.
+        if self.host.transport == "ssh" and proc.returncode in (255, 127):
+            code = ERR_UNAVAILABLE
+            what = (
+                f"ssh to {self.host.ssh_target} failed"
+                if proc.returncode == 255
+                else f"{self.host.herdr_bin} not found on {self.host.name}"
+            )
+            message = f"{what}: {message}"
+
         raise HerdrError(
             code=code,
             message=message,
@@ -141,7 +203,7 @@ class Herdr:
 
         `herdr agent read` and `herdr pane read` are the ones that matter.
         """
-        argv = self._base_argv() + args
+        argv = self._argv(args)
         proc = await asyncio.create_subprocess_exec(
             *argv,
             stdout=asyncio.subprocess.PIPE,

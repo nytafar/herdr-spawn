@@ -77,6 +77,31 @@ service can do for you:
   alive and doing nothing. Preflight checks this and refuses rather than letting it
   happen.
 
+### Remote hosts, over ssh
+
+A `transport = "ssh"` host runs the herdr CLI on the far side. There is no socket
+forwarding and no agent installed over there — if this works, so does everything else:
+
+```sh
+ssh -o BatchMode=yes <ssh_target> /path/to/herdr workspace list
+```
+
+`BatchMode=yes` is the real test: authentication must be non-interactive, because
+nothing here can answer a passphrase or a host-key prompt. Point `ssh_target` at a
+`Host` alias from your `~/.ssh/config` and let ssh resolve the address, identity and
+options — an alias whose host key you have already accepted fails *closed* if it ever
+stops resolving, which is what you want from a target that starts agents.
+
+Everything else follows: `herdr_bin` and `home` describe the **remote** filesystem
+(`/opt/homebrew/bin/herdr` and `/Users/you` on a mac), and `cwd_allowlist` is checked
+against remote paths. Long prompts are written to the handoff file on the remote side
+too. Both preflight checks and the Remote Control lookup happen over the same
+connection, so a remote spawn returns the same `claude.ai/code` link a local one does.
+
+ssh's own failures are reported as themselves — `255` as a connection failure naming
+the target, `127` as a missing `herdr_bin` — rather than as a herdr error, so you are
+not sent debugging a herdr server that was never contacted.
+
 ---
 
 ## Configure
@@ -280,12 +305,34 @@ back to back concatenate into one submitted line and lose the first Enter —
 and both still return rc=0. For a chat-driven service, two messages inside one
 second is ordinary traffic. The tests assert two rapid prompts produce two turns.
 
+**The remote poll runs remotely.** Waiting for `bridgeSessionId` takes up to 15 s at
+200 ms intervals. Doing that from this side would be 75 ssh handshakes; the loop is sent
+over and returns once. Same reason the two preflight checks share a single round trip.
+And the prompt reaches the remote `herdr` through `shlex.join`, so arbitrary prose —
+quotes, backticks, `$`, newlines — arrives as one argument and never reaches the remote
+*shell* as syntax.
+
 **No pane scraping for the Remote Control id.** Claude Code writes
 `bridgeSessionId` to `~/.claude/sessions/<pid>.json` roughly 1.2 s *before*
 `herdr agent start` even returns. Scraping the banner works at default pane width and
 fails below ~123 columns, where Ink hard-breaks the line. The registry read has no
 race, no regex, and no width dependence — but it is undocumented internals, so every
 spawn records the observed Claude Code `version` and the resolver warns when it changes.
+
+**The pane's Claude process is not `foreground_processes[0]`.** Claude spawns children —
+`caffeinate`, one process per configured MCP server — and they sort ahead of it: on a
+real pane it came back *last of seven*, behind `caffeinate`. Reading the session
+registry for a child's pid finds no record, so Remote Control reports itself unavailable
+on a spawn whose bridge connected perfectly well. The foreground process *group* id is
+the job leader, which is claude. (`argv0` is the second opinion; `name` is no help — it
+holds the version string.)
+
+**`TZ=UTC` on the remote `ps`.** The pid-recycle guard compares the session record's
+`procStart` against the live process. On macOS that field is a `ctime` string rather than
+Linux clock ticks — and Claude Code writes it in **UTC** while `ps -o lstart=` prints
+**local** time. Anywhere off UTC the two differ by exactly the offset, and the guard
+rejects every good spawn with "pid reused". The remote probe also picks its format per
+platform: `/proc/<pid>/stat` where that exists, `ps` where it does not.
 
 **RC failing is not the spawn failing.** `bridgeSessionId` only appears once the
 bridge connects. Offline, unauthenticated or rate-limited, it never does — and
