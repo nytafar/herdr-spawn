@@ -1,20 +1,18 @@
 # herdr-spawn
 
-Hand a prompt you composed in a chat to a **real coding agent** on one of your own
-machines. With Claude Code that means Remote Control is on and you get back a link that
-opens the session in the Code tab; with the other agents you get a live pane you take
-over in the terminal.
-
-One tool. `spawn_agent`.
+An MCP server with one tool. `spawn_agent` hands a prompt you composed in a chat to a
+**real coding agent** on one of your own machines. With Claude Code that means Remote
+Control is on and you get back a link that opens the session in the Code tab; with the
+other agents you get a live pane you take over in the terminal.
 
 The chat does what a chat is good at — thinking the task through with you — and then
 the actual work happens in a real terminal, on a real checkout, with your real
 credentials, on the machine that has them. You keep the conversation; the agent keeps
 the filesystem.
 
-Built on [herdr](https://herdr.dev), a terminal workspace manager for AI coding agents,
-which supplies the workspaces, tabs, panes and the `agent start` / `agent prompt` verbs
-this drives.
+Built on [herdr](https://herdr.dev), a terminal workspace manager for AI coding
+agents, which supplies the workspaces, tabs, panes and the `agent start` /
+`agent prompt` verbs this drives.
 
 ---
 
@@ -28,13 +26,31 @@ spawn_agent(host, prompt, [agent], [cwd], [label], [session_name], [workspace], 
 
 1. **Preflight** — host enabled, the agent available *there*, `cwd` resolves under an
    allowed root and is already trusted by that agent, herdr answering on that host.
-2. Find or create the `inbox` workspace, `--no-focus`.
-3. Create a tab there and start the agent in its pane.
+   Nothing is created until all of it holds: a failure after a tab exists would leave
+   an orphaned pane sitting on a dialog, which is worse than a clean refusal.
+2. Find or create the `inbox` workspace and a tab in it, `--no-focus`.
+3. Start the agent in the tab's pane, with that agent's own flags.
 4. Resolve the claude.ai Remote Control id — Claude Code only.
-5. Submit the prompt, under a per-pane lock.
-6. Append a record to `~/.local/state/herdr-spawn/spawns.jsonl`.
+5. Append a record to `~/.local/state/herdr-spawn/spawns.jsonl`.
+6. Submit the prompt, under a per-pane lock.
 
-A spawn never steals focus. Nothing is ever closed that this service did not create.
+A good spawn comes back in a few seconds:
+
+```json
+{
+  "status": "spawned",
+  "host": "xl",
+  "agent": "claude",
+  "session_name": "chat-login-fix-0821-1642",
+  "cwd": "/home/you/scratch/webapp",
+  "remote_url": "https://claude.ai/code/session_01ABC…"
+}
+```
+
+— plus the workspace, tab and pane ids, so you can always find the terminal it landed
+in. A spawn never steals focus. Nothing is ever closed that this service did not
+create. And once the tab exists, a failure returns its coordinates and the pane tail
+rather than cleaning up silently — a visible broken tab beats a vanished one.
 
 Prompts over 2 000 characters are written to `<cwd>/.herdr-handoff/<session>.md` and
 handed over as an `@`-reference instead — terminal injection of multi-kilobyte text is
@@ -44,7 +60,8 @@ fragile, and the file doubles as a record of what was actually asked.
 
 ## Install
 
-Requires Python 3.13+, [uv](https://docs.astral.sh/uv/), herdr, and Claude Code.
+Requires Python 3.13+, [uv](https://docs.astral.sh/uv/), and herdr on every host you
+enable; Claude Code wherever you want the claude.ai link.
 
 ```sh
 git clone https://github.com/nytafar/herdr-spawn.git ~/mcp/herdr-spawn
@@ -74,24 +91,25 @@ Two things must already be true on any host you enable, and neither is something
 service can do for you:
 
 - **herdr is running there.** `herdr workspace list` must print JSON.
-- **the cwd is trusted by Claude Code.** Start Claude there once by hand and accept the
-  trust dialog. Otherwise the spawned pane just sits on that dialog forever, looking
-  alive and doing nothing. Preflight checks this and refuses rather than letting it
-  happen.
+- **the cwd is trusted by the agent you will start.** Start it there once by hand and
+  accept the trust dialog. An untrusted directory does not fail — the spawned pane just
+  sits on that dialog forever, looking alive and doing nothing. Preflight reads the
+  agent's own trust store (`~/.claude.json` for Claude, `~/.codex/config.toml` for
+  Codex, a trusted parent covering its children in both) and refuses rather than
+  letting that happen. An agent whose store it does not know cannot be pre-empted; the
+  pane tail is then the only warning.
 
 ## Agents
 
-herdr drives 21 coding agents — `pi claude codex gemini cursor devin agy cline omp
-mastracode opencode copilot kimi kiro droid amp grok hermes kilo qodercli maki`
-(`agy` is Antigravity CLI). This exposes all of them, but **advertises only the ones
-you actually have.**
-
-At startup each enabled host is asked two questions: what kinds does its herdr support
-(parsed from `agent start --help`, because the set grows between releases), and which of
-those are on its PATH. The `agent` enum is the union of the answers. So a fleet with
-Claude and Codex on one box and Pi and Devin on a laptop advertises four values, not
-twenty-one — the schema is paid for on every request forever, and listing agents nobody
-has installed buys nothing but tokens.
+herdr can drive 21 coding agents today, and the set grows between releases — 0.8.2
+added a kind 0.8.0 did not have. So the supported kinds are parsed from
+`agent start --help` at startup rather than hardcoded, each enabled host is asked which
+of those are on its PATH, and the `agent` enum advertised to callers is the union of
+the answers. Agents nobody has installed are not advertised: the schema is paid for on
+every request forever, and they could only ever be refused. On this fleet — three
+hosts, four agents — the entire `tools/list` payload comes to 875 characters, roughly
+215 tokens, which is what every conversation pays for having the tool enabled whether
+or not it spawns anything.
 
 The **per-host** matrix stays out of the schema entirely, because it is the single most
 expensive thing you could put there and it changes whenever you install something.
@@ -107,7 +125,8 @@ agent this herdr has never heard of.
 
 A host that was asleep at startup comes back as *unknown* rather than *empty*, and
 unknown permits everything: a closed laptop must not have its agents hidden until the
-next restart. The spawn goes through and the real error comes back from the real attempt.
+next restart. The spawn goes through and the real error comes back from the real
+attempt.
 
 **Only Claude Code returns a link.** Nothing else has a claude.ai bridge — no session
 registry, no `bridgeSessionId`, nothing to link to. Other agents return
@@ -118,10 +137,9 @@ seconds reaching a foregone conclusion.
 Per-agent quirks live in `agents.py`, and there are only three that matter: the launch
 flags (Claude's `--dangerously-skip-permissions` is Codex's
 `--dangerously-bypass-approvals-and-sandbox`; an agent with no profile gets **no**
-flags rather than someone else's dangerous one), where each keeps its trust store
-(`~/.claude.json` vs `~/.codex/config.toml`, same parent-walking lookup), and whether it
-has Remote Control. Adding an agent is a few lines there; an agent with no profile at
-all still starts fine.
+flags rather than someone else's dangerous one), where each keeps its trust store, and
+whether it has Remote Control. Adding an agent is a few lines there; an agent with no
+profile at all still starts fine.
 
 ### Remote hosts, over ssh
 
@@ -245,18 +263,14 @@ network — then the target is `http://<container-name>:8230/mcp`.
 
 ### 3. Get an admin token
 
-The registry authenticates management calls with an OAuth2 client-credentials (M2M)
-token from its identity provider — Keycloak by default. The bootstrap script writes the
-client secret to `.oauth-tokens/<realm>-m2m.json` in the gateway checkout.
-
-Note the ceiling before you plan around it: **an M2M client can register and toggle, but
-not patch or remove** — those return 403. Fixing a bad record means editing the
-registry's MongoDB directly and restarting the registry container to reload. Get it
-right the first time.
+Management calls take an OAuth2 client-credentials (M2M) token from the registry's
+identity provider — Keycloak by default; the bootstrap script writes the client secret
+to `.oauth-tokens/<realm>-m2m.json`. Know the ceiling before you plan around it: **an
+M2M client can register and toggle, but not patch or remove** — fixing a bad record
+means editing the registry's MongoDB directly and restarting the registry container.
+Get it right the first time.
 
 ### 4. Register the backend
-
-Write a registration JSON:
 
 ```json
 {
@@ -278,13 +292,13 @@ uv run python api/registry_management.py list          # confirm it is there
 
 Three details that each cost an hour if you get them wrong:
 
-- **`proxy_pass_url` must end in `/mcp`.** The registry's health check only initialises
-  an MCP session when it does; without it the server registers and then sits permanently
-  unhealthy with no useful error.
-- **Leave `mcp_endpoint` unset.** Setting it yields a broken relative path.
-- **`auth_scheme: "none"` means "no auth *between gateway and backend*"** — which is
-  correct here, because the backend is only reachable from the gateway. The edge OAuth is
-  still fully in force. It does *not* mean the tool is public.
+- **`proxy_pass_url` must end in `/mcp`** — the health check only initialises an MCP
+  session when it does; without it the server sits permanently unhealthy with no
+  useful error.
+- **Leave `mcp_endpoint` unset** — setting it yields a broken relative path.
+- **`auth_scheme: "none"` means no auth *between gateway and backend*** — correct here,
+  since only the gateway can reach it. The edge OAuth is still fully in force; it does
+  *not* mean the tool is public.
 
 ### 5. Enable it, and grant it explicitly
 
@@ -296,17 +310,16 @@ curl -X POST https://gateway.example.com/api/servers/toggle \
   -d 'path=/herdr-spawn' -d 'new_state=enabled'
 ```
 
-Then authorise it in `auth_server/scopes.yml`. Read your existing entries before assuming
-you need to add one — a group with `server: '*'`, `tools: ['all']` already grants every
-new server the moment it registers, including this one. **That is worth a deliberate
-decision for a tool that starts autonomous agents**, not a default you inherit. Give it
-its own block if you want it narrower:
+Then authorise it in `auth_server/scopes.yml` — and read what is already there first: a
+group with `server: '*'`, `tools: ['all']` grants every new server the moment it
+registers, including this one. **For a tool that starts autonomous agents that is worth
+a deliberate decision**, not a default you inherit. Narrower:
 
 ```yaml
 my-group:
 - server: herdr-spawn
   methods: [tools/list, tools/call]
-  tools: [spawn_claude]
+  tools: [spawn_agent]
 ```
 
 ### 6. Verify the edge, both ways
@@ -322,19 +335,15 @@ The unauthenticated 401 is the half people skip, and it is the half that matters
 
 ### 7. Audit what the gateway does not
 
-Gateways typically log tool **names** but not **arguments** — so the prompt a caller
-actually sent is nowhere in the gateway's logs. `spawns.jsonl` is the only record of it
-on the box, and even there only as a SHA-256 (the prompt body itself is kept only when it
-was large enough to be written to a handoff file). Know which of those you want before
-you need them.
+Gateways typically log tool **names** but not **arguments** — the prompt a caller
+actually sent is nowhere in the gateway's logs. `spawns.jsonl` holds it only as a
+SHA-256 (the body survives only when it was long enough to become a handoff file).
+Know which record you want before you need it.
 
-### One last thing to check on your own gateway
-
-Look at what else the gateway publishes on the host. An internal proxy or admin port
-published on `0.0.0.0` can be an unauthenticated path straight to your backend, right
-past the OAuth edge you just configured. Enumerate with `ss -ltn`, and confirm each
-published port either requires auth or is bound to loopback — **before** you point a
-tool that starts agents at it.
+And look at what else the gateway publishes on the host: an internal proxy or admin
+port on `0.0.0.0` can be an unauthenticated path straight past the OAuth edge to your
+backend. Enumerate with `ss -ltn` and confirm every published port either requires
+auth or is bound to loopback — **before** you point a tool that starts agents at it.
 
 ---
 
@@ -352,10 +361,9 @@ and both still return rc=0. For a chat-driven service, two messages inside one
 second is ordinary traffic. The tests assert two rapid prompts produce two turns.
 
 **The remote poll runs remotely.** Waiting for `bridgeSessionId` takes up to 15 s at
-200 ms intervals. Doing that from this side would be 75 ssh handshakes; the loop is sent
-over and returns once. Same reason the two preflight checks share a single round trip.
-And the prompt reaches the remote `herdr` through `shlex.join`, so arbitrary prose —
-quotes, backticks, `$`, newlines — arrives as one argument and never reaches the remote
+200 ms intervals — from this side that would be 75 ssh handshakes, so the loop is sent
+over and returns once. And the prompt reaches the remote `herdr` through `shlex.join`:
+quotes, backticks, `$` and newlines arrive as one argument and never reach the remote
 *shell* as syntax.
 
 **No pane scraping for the Remote Control id.** Claude Code writes
@@ -401,13 +409,6 @@ bridge connects. Offline, unauthenticated or rate-limited, it never does — and
 the pane details rather than failing: a local Claude Code session with no phone
 handle is still a working session.
 
-**cwd is optional, and defaults to a per-host sandbox.** Omit it and the spawn lands in
-that host's `default_cwd`, so a caller that doesn't know your layout doesn't have to
-guess — and a guess just gets refused. The default must itself sit under
-`cwd_allowlist`; a misconfigured one outside it is still refused rather than trusted.
-An explicit cwd is validated the same way, and a host with no `default_cwd` refuses a
-spawn that names none.
-
 **Absolute path to the herdr binary, `HOME` always set.** A systemd `--user` unit's
 PATH has no `~/.local/bin`, and with a stripped environment herdr silently falls
 back to `/tmp/herdr/herdr.sock` and reports `server_not_running` — which blames the
@@ -417,13 +418,15 @@ wrong thing entirely and sends you debugging a healthy server.
 rc=1, but rc=2 (e.g. an unsupported `--kind`) prints a bare sentence. A wrapper that
 unconditionally `json.loads(stderr)` crashes there instead of reporting the problem.
 
-**The advertised tool schema is slimmed after generation.** This server is meant to be
-enabled in every chat and every Claude Code session, so its definition is paid for on
-every request. Pydantic's per-field `title` and `anyOf: [T, null]` expansion cost ~a
-quarter of that and tell a calling model nothing. Stripping them takes the tool from
-357 to **172 tokens**. It edits `parameters` (what clients see), never `fn_metadata`
-(what validates), so the two cannot desync — and if a future SDK moves the attribute,
-it logs and serves the verbose schema instead.
+**The advertised tool schema is slimmed after generation.** Pydantic emits a `title`
+for every field and expands `str | None` into a two-armed `anyOf`; neither tells a
+calling model anything it cannot read off the parameter name, and together they are
+about a quarter of the whole definition. Collapsing the union makes the advertised
+schema *stricter* than what is actually accepted, which is the safe direction: a
+client that omits the parameter still works, and one that sends null still validates.
+The slimming edits `parameters` (what clients see), never `fn_metadata` (what
+validates), so the two cannot desync — and if a future SDK moves the attribute, it
+logs and serves the verbose schema instead.
 
 ---
 

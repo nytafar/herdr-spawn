@@ -1,4 +1,4 @@
-"""MCP server exposing a single tool: spawn_claude.
+"""MCP server exposing a single tool: spawn_agent.
 
 One tool, deliberately. This server is meant to be enabled in every chat and every
 Claude Code session, so its tool definitions are paid for on every request whether
