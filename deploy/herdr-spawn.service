@@ -1,0 +1,27 @@
+[Unit]
+Description=herdr-spawn MCP service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# A `systemctl --user` unit, running as YOU. Not a system unit and not a separate
+# service user: the herdr socket is srw------- inside a 0700 home and
+# ~/.claude/sessions is drwx------, so no other uid can reach either of them.
+# %h expands to this user's home, which is why no absolute path appears here.
+WorkingDirectory=%h/mcp/herdr-spawn
+Environment=HOME=%h
+# A systemd --user PATH has no ~/.local/bin, where uv and herdr usually live.
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+Environment=PYTHONUNBUFFERED=1
+# Site-specific settings — port, bind address, docker network. Gitignored; see
+# service.env.example. The leading `-` makes it optional.
+EnvironmentFile=-%h/.config/herdr-spawn/service.env
+ExecStart=/bin/bash %h/mcp/herdr-spawn/deploy/run.sh
+Restart=on-failure
+RestartSec=5
+MemoryMax=300M
+NoNewPrivileges=true
+
+[Install]
+WantedBy=default.target

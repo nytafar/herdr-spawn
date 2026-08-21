@@ -1,0 +1,26 @@
+[project]
+name = "herdr-spawn"
+version = "0.1.0"
+description = "Hand a composed prompt from a chat to a real Claude Code session on one of your hosts, with Remote Control on."
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.13"
+# 2.0 floor, not 1.x: this uses the `mcp.server.MCPServer` API, which does not
+# exist before 2.0 — a resolver that picks 1.x fails at import, not at runtime.
+dependencies = ["mcp>=2.0.0"]
+
+[project.urls]
+Homepage = "https://github.com/nytafar/herdr-spawn"
+
+[project.scripts]
+herdr-spawn = "herdr_spawn.server:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/herdr_spawn"]
+
+[dependency-groups]
+dev = ["pytest>=8.0"]

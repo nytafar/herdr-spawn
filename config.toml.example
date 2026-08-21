@@ -1,0 +1,75 @@
+# herdr-spawn — host registry.
+#
+# Copy to ~/.config/herdr-spawn/config.toml and edit. That file is the ONLY place
+# your machine names, addresses and paths live; it is deliberately outside the
+# repo and gitignored.
+#
+# Every [hosts.<name>] table becomes a value of the tool's `host` parameter, so
+# name them the way you'd say them out loud.
+
+[service]
+state_dir = "~/.local/state/herdr-spawn"
+
+
+# ---------------------------------------------------------------------------
+# A local host — the machine this service itself runs on. herdr is reached over
+# its own unix socket, so there is no network hop and no credentials.
+# ---------------------------------------------------------------------------
+[hosts.local]
+enabled = true
+transport = "socket"
+socket_path = "/home/you/.config/herdr/herdr.sock"
+# Never a bare "herdr": a systemd --user unit's PATH has no ~/.local/bin, and with
+# herdr unresolved the CLI silently falls back to /tmp/herdr/herdr.sock and reports
+# `server_not_running` — which blames the wrong thing entirely.
+herdr_bin = "/home/you/.local/bin/herdr"
+home = "/home/you"
+# Both default to <home>/.claude/sessions and <home>/.claude.json. Set them only
+# if yours are somewhere else.
+# claude_sessions_dir = "/home/you/.claude/sessions"
+# claude_config       = "/home/you/.claude.json"
+
+# Spawned tabs land in a workspace with this label, created on first use.
+inbox_label = "inbox"
+
+# THE blast-radius control. A spawn's cwd must resolve under one of these roots.
+# Keep it to a sandbox you would not mind an unattended agent working in.
+cwd_allowlist = ["/home/you/scratch"]
+
+# Where a spawn lands when the caller names no cwd — so a caller that doesn't
+# know your layout doesn't have to guess. Must itself be under cwd_allowlist.
+# Never a broad home or a repo root: a default is only as safe as what it points at.
+default_cwd = "/home/you/scratch"
+
+# Never closed, never spawned into. Second belt behind the state-file guard.
+protected_workspaces = ["w1", "w2"]
+
+# Per-host only, never a tool parameter. An unattended agent with permissions
+# skipped, started from a chat message, is the one combination that can quietly
+# do real damage.
+skip_permissions = false
+sandbox = false
+
+
+# ---------------------------------------------------------------------------
+# A remote host, driven over ssh. `ssh_target` must be something your ssh config
+# already resolves and authenticates non-interactively — test it first:
+#
+#     ssh -o BatchMode=yes <ssh_target> /path/to/herdr workspace list
+#
+# If that does not print JSON, herdr-spawn cannot use the host either.
+# ---------------------------------------------------------------------------
+[hosts.laptop]
+enabled = false
+transport = "ssh"
+ssh_target = "you@laptop.example"          # or a Host alias from ~/.ssh/config
+# ssh_identity = "/home/you/.ssh/id_ed25519"   # omit to use your ssh config
+herdr_bin = "/opt/homebrew/bin/herdr"      # the binary ON THE REMOTE host
+home = "/Users/you"                        # the REMOTE home
+cwd_allowlist = ["/Users/you/scratch"]
+default_cwd = "/Users/you/scratch"
+inbox_label = "inbox"
+
+# Shown verbatim when a caller targets a disabled host. Say what is missing, so
+# the refusal is actionable rather than a dead end.
+# unavailable_reason = "ssh works but `agent start --kind claude` has never been proven here"
