@@ -933,3 +933,58 @@ def test_config_accepts_an_hc_only_host(tmp_path):
 def test_remote_poll_pins_the_locale_for_ps():
     """A Norwegian mac prints `tor. 12 nov.`; Claude Code wrote `Thu Nov 12`."""
     assert "LC_ALL=C TZ=UTC ps -o lstart=" in rcmod._REMOTE_POLL
+
+
+# --- vault-relative cwd --------------------------------------------------------
+
+
+def _vault_host(tmp_path: Path, **kw) -> HostConfig:
+    vault = tmp_path / "allowed" / "vault"
+    (vault / "efforts").mkdir(parents=True)
+    (vault / "efforts" / "plan.md").write_text("x")
+    return host(tmp_path, vaults={"vault": str(vault)}, **kw)
+
+
+def test_vault_relative_cwd_resolves_under_the_vault(tmp_path):
+    h = _vault_host(tmp_path)
+    vault = tmp_path / "allowed" / "vault"
+    assert h.resolve_cwd("vault/efforts") == vault / "efforts"
+    # With one vault the name may be left off, as a vault tool reports it.
+    assert h.resolve_cwd("efforts") == vault / "efforts"
+    assert h.resolve_cwd("vault") == vault
+
+
+def test_a_note_path_becomes_its_folder(tmp_path):
+    h = _vault_host(tmp_path)
+    vault = tmp_path / "allowed" / "vault"
+    assert h.resolve_cwd("vault/efforts/plan.md") == vault / "efforts"
+    assert h.resolve_cwd(str(vault / "efforts" / "plan.md")) == vault / "efforts"
+    # Judged by name too: a remote note cannot be looked at from here.
+    assert h.resolve_cwd("vault/efforts/not-here-yet.md") == vault / "efforts"
+
+
+def test_vault_relative_cwd_cannot_leave_the_allowlist(tmp_path):
+    h = _vault_host(tmp_path)
+    with pytest.raises(ConfigError, match="not under an allowed root"):
+        h.resolve_cwd("vault/../../../etc")
+    outside = host(tmp_path, vaults={"v": str(tmp_path / "elsewhere")})
+    with pytest.raises(ConfigError, match="not under an allowed root"):
+        outside.resolve_cwd("v/notes")
+
+
+def test_relative_cwd_needs_a_vault(tmp_path):
+    with pytest.raises(ConfigError, match="absolute"):
+        host(tmp_path).resolve_cwd("efforts/x")
+    two = host(tmp_path, vaults={"a": "/x/a", "b": "/x/b"})
+    with pytest.raises(ConfigError, match="must start with a vault name"):
+        two.resolve_cwd("efforts/x")
+
+
+def test_instructions_name_vaults_and_are_absent_without_any(tmp_path):
+    from herdr_spawn.server import build_server, instructions
+
+    assert instructions(_conf(tmp_path, host(tmp_path))) is None
+    conf = _conf(tmp_path, _vault_host(tmp_path))
+    text = instructions(conf)
+    assert "test: vault" in text and "relative to their vault" in text
+    assert build_server(conf).instructions == text

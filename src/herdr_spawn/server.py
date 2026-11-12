@@ -981,8 +981,30 @@ async def list_hosts(conf: Config, host_name: str | None = None) -> dict[str, An
 # --- MCP wiring ------------------------------------------------------------
 
 
+def instructions(conf: Config) -> str | None:
+    """What a caller cannot work out from the schema: how to name a vault folder.
+
+    Served once per session rather than on every request, and only when there is
+    a vault to talk about -- it names the vaults so that a caller holding a note
+    path from a vault tool does not have to guess where the vault lives on disk.
+    """
+    per_host = [
+        f"{h.name}: {', '.join(sorted(h.vaults))}"
+        for h in conf.hosts.values() if h.enabled and h.vaults
+    ]
+    if not per_host:
+        return None
+    return (
+        "To start an agent on a note or folder in an Obsidian vault, pass spawn_agent's cwd "
+        "as <vault>/<path relative to that vault>, e.g. "
+        "\"myvault/projects/plan.md\". Vault paths are relative to their vault, so do not "
+        "guess an absolute path. A note path is fine: the agent starts in the note's folder, "
+        "so name the note in the prompt. Vaults by host: " + "; ".join(per_host) + "."
+    )
+
+
 def build_server(conf: Config, capabilities: dict[str, HostAgents] | None = None) -> MCPServer:
-    server = MCPServer(name="herdr-spawn")
+    server = MCPServer(name="herdr-spawn", instructions=instructions(conf))
     caps = capabilities or {}
 
     # This server is enabled in every chat and every Claude Code session, so its
@@ -997,7 +1019,7 @@ def build_server(conf: Config, capabilities: dict[str, HostAgents] | None = None
         agent: str = DEFAULT_AGENT,
         cwd: Annotated[
             str | None,
-            Field(description="Absolute path under an allowed root. Omit to use the host's default sandbox."),
+            Field(description="Absolute path under an allowed root, or <vault>/<path in vault>. Omit for the host's default sandbox."),
         ] = None,
         label: str | None = None,
         session_name: str | None = None,

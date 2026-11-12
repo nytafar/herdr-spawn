@@ -50,6 +50,12 @@ inbox_label = "inbox"
 # Keep it to a sandbox you would not mind an unattended agent working in.
 cwd_allowlist = ["/home/you/scratch"]
 
+# Obsidian vaults on this host. A caller that knows a note only by its path inside
+# the vault can then pass cwd = "notes/projects/plan.md": it resolves under the
+# vault root (and to the note's folder), and must still pass cwd_allowlist. The
+# vault names are served to clients in the MCP instructions.
+# vaults = { notes = "/home/you/notes" }
+
 # Where a spawn lands when the caller names no cwd — so a caller that doesn't
 # know your layout doesn't have to guess. Must itself be under cwd_allowlist.
 # Never a broad home or a repo root: a default is only as safe as what it points at.

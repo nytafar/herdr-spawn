@@ -218,6 +218,7 @@ The settings that matter:
 | Key | Why it matters |
 |---|---|
 | `cwd_allowlist` | **The** blast-radius control. A spawn's cwd must resolve under one of these roots — fully resolved, so `…/scratch-evil` does not pass a `…/scratch` root and symlinks cannot walk out. |
+| `vaults` | Obsidian vaults on the host, name to root. Lets a caller pass `cwd` as `<vault>/<path in vault>`, including a note path (the agent starts in the note's folder). The result must still pass `cwd_allowlist`. Vault names are served in the MCP `instructions`. |
 | `default_cwd` | Where a spawn lands when the caller names no cwd. Must itself be under `cwd_allowlist`; a misconfigured one is refused, not trusted. A host without it refuses any spawn that names no cwd. |
 | `protected_workspaces` | herdr TUI only. Never closed, never spawned into. |
 | `ui` | The host's default landing place: `hc` (default) or `herdr`. A caller can still ask for the other. |

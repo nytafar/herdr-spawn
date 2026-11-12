@@ -72,6 +72,10 @@ class HostConfig:
     # get. An old agent may not report its status, and then nothing can tell when
     # it has finished.
     agent_bin: dict[str, str] = field(default_factory=dict)
+    # Obsidian vaults on this host, name -> root. A caller holding a note path
+    # from a vault tool knows it relative to the vault, not where the vault sits
+    # on disk; this lets it pass `<vault>/<path>` as the cwd.
+    vaults: dict[str, str] = field(default_factory=dict)
     skip_permissions: bool = False
     sandbox: bool = False
     unavailable_reason: str | None = None
@@ -146,8 +150,15 @@ class HostConfig:
 
         candidate = Path(raw).expanduser()
         if not candidate.is_absolute():
-            raise ConfigError(f"cwd must be an absolute path, got {raw!r}")
+            candidate = self._from_vault(raw)
+        # A note is not somewhere an agent can start, but its folder is. `.md` is
+        # judged by name because a remote host's files cannot be looked at from
+        # here; anything that is a file on this machine counts too.
+        if candidate.suffix.lower() == ".md" or candidate.is_file():
+            candidate = candidate.parent
 
+        # The allowlist check below runs on the resolved path, so a vault-relative
+        # `../..` or a symlink gets no further than an absolute one would.
         resolved = candidate.resolve()
         for root in self.cwd_allowlist:
             root_resolved = Path(root).expanduser().resolve()
@@ -157,6 +168,21 @@ class HostConfig:
         raise ConfigError(
             f"cwd {resolved} is not under an allowed root on {self.name}. "
             f"Allowed: {', '.join(self.cwd_allowlist)}"
+        )
+
+
+    def _from_vault(self, raw: str) -> Path:
+        """Turn `<vault>/<path>` (or, with one vault, just `<path>`) into a path."""
+        if not self.vaults:
+            raise ConfigError(f"cwd must be an absolute path, got {raw!r}")
+        first, _, rest = raw.strip("/").partition("/")
+        if first in self.vaults:
+            return Path(self.vaults[first]) / rest
+        if len(self.vaults) == 1:
+            return Path(next(iter(self.vaults.values()))) / raw.strip("/")
+        raise ConfigError(
+            f"relative cwd {raw!r} must start with a vault name on {self.name}: "
+            f"{', '.join(sorted(self.vaults))}"
         )
 
 
@@ -223,6 +249,7 @@ def load(path: Path | str | None = None) -> Config:
             hc_machine=h.get("hc_machine"),
             space_roots=tuple(h.get("space_roots", ())),
             agent_bin={str(k): str(v) for k, v in (h.get("agent_bin") or {}).items()},
+            vaults={str(k): str(v) for k, v in (h.get("vaults") or {}).items()},
             skip_permissions=bool(h.get("skip_permissions", False)),
             sandbox=bool(h.get("sandbox", False)),
             unavailable_reason=h.get("unavailable_reason"),
