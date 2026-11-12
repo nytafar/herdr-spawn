@@ -886,7 +886,8 @@ case "$1" in
 esac
 """
     bin_ = _fake_hc(tmp_path, body)
-    h = host(tmp_path, hc_bin=bin_, space_roots=(str(tmp_path),))
+    h = host(tmp_path, hc_bin=bin_, space_roots=(str(tmp_path),),
+             agent_bin={"opencode": "/opt/oc/opencode"})
     conf = _conf(tmp_path, h)
     # opencode: no trust store to preflight, no Remote Control, prompt typed in.
     res = asyncio.run(spawn(conf, host_name=h.name, prompt="do the thing", cwd_raw=str(scratch),
@@ -897,7 +898,7 @@ esac
 
     calls = _hc_calls(tmp_path)
     run = next(c for c in calls if c[0] == "run")
-    assert "herdr.space=sp-scratch" in run and run[run.index("--") + 1 :] == ["opencode"]
+    assert "herdr.space=sp-scratch" in run and run[run.index("--") + 1 :] == ["/opt/oc/opencode"]
     send = next(c for c in calls if c[0] == "send")
     assert send[-2:] == ["t7", "do the thing"]
 

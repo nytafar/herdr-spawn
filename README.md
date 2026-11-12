@@ -222,6 +222,7 @@ The settings that matter:
 | `protected_workspaces` | herdr TUI only. Never closed, never spawned into. |
 | `ui` | The host's default landing place: `hc` (default) or `herdr`. A caller can still ask for the other. |
 | `hc_machine` | The host's name in `hc machine ls`, for a host that is not this machine. With `transport = "hc"` the host has no herdr TUI at all and is driven through hc only. |
+| `agent_bin` | Per-agent binary path under hc, e.g. `{ claude = "/root/.local/bin/claude" }`, for a host where the bare name finds a stale copy that does not report status. |
 | `space_roots` | What counts as a top folder when picking a space. Default: the host's home. |
 | `skip_permissions` | Per-host only, never a tool parameter. An unattended agent with permissions skipped, started from a chat message, is the one combination that can quietly do real damage. Applied with each agent's own flag, and not at all for agents whose flag isn't known. |
 

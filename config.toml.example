@@ -109,3 +109,6 @@ hc_machine = "web"
 home = "/root"
 cwd_allowlist = ["/var/www/staging.example.com"]
 space_roots = ["/var/www"]
+# Name the binary when a bare `claude` finds the wrong one there: a stale copy
+# earlier on the PATH may not report its status, and `wait` then never returns.
+# agent_bin = { claude = "/root/.local/bin/claude" }

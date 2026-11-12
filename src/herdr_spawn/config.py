@@ -67,6 +67,11 @@ class HostConfig:
     # A spawn joins the space of its top folder: the first path component below
     # one of these roots. Defaults to the host's home, so ~/code/x lands in `code`.
     space_roots: tuple[str, ...] = ()
+    # Which binary to start for an agent under hc, when the bare name is wrong on
+    # this host -- typically a stale copy earlier on the PATH that hc's terminals
+    # get. An old agent may not report its status, and then nothing can tell when
+    # it has finished.
+    agent_bin: dict[str, str] = field(default_factory=dict)
     skip_permissions: bool = False
     sandbox: bool = False
     unavailable_reason: str | None = None
@@ -217,6 +222,7 @@ def load(path: Path | str | None = None) -> Config:
             hc_bin=h.get("hc_bin", ""),
             hc_machine=h.get("hc_machine"),
             space_roots=tuple(h.get("space_roots", ())),
+            agent_bin={str(k): str(v) for k, v in (h.get("agent_bin") or {}).items()},
             skip_permissions=bool(h.get("skip_permissions", False)),
             sandbox=bool(h.get("sandbox", False)),
             unavailable_reason=h.get("unavailable_reason"),

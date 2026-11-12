@@ -708,7 +708,7 @@ async def _spawn_hc(
 
     def argv_for(name: str) -> list[str]:
         args = [name if a == session_name else a for a in agent_args]
-        argv = [agent, *prof.hc_args, *args]
+        argv = [host.agent_bin.get(agent, agent), *prof.hc_args, *args]
         if prof.prompt_as_arg:
             # `--` only when needed: a brief that opens with a dash would
             # otherwise be read as a flag.
