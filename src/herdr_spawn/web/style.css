@@ -46,3 +46,4 @@ pre { background: #0b0d10; border: 1px solid var(--line); border-radius: 8px; pa
 .chips { display: flex; flex-wrap: wrap; gap: 6px; margin: 4px 0 8px; }
 .chips:empty { display: none; }
 .chip { font-size: .85rem; padding: 6px 10px; border-radius: 16px; }
+.chip.active { border-color: var(--accent); color: var(--accent); }

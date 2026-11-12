@@ -102,3 +102,20 @@ def test_prompts_dir_is_read_from_config_and_must_exist(tmp_path, lib):
     p.write_text(f'[service]\nprompts_dir = "{tmp_path / "missing"}"\n[hosts.x]\ncwd_allowlist = ["/a"]\n')
     with pytest.raises(ConfigError, match="prompts_dir"):
         cfg.load(p)
+
+
+def test_variants_group_by_family_in_their_order(tmp_path):
+    d = tmp_path / "p"
+    d.mkdir()
+    _write(d, "research-web", "kind: prompt\nfamily: Research\nvariant: Web\norder: 2\ntitle: Research (Web)")
+    _write(d, "research-github", "kind: prompt\nfamily: Research\nvariant: GitHub\norder: 1\ntitle: Research (GitHub)\ndescription: with /github-explore: repos")
+    _write(d, "review", "kind: prompt\ntitle: Review")
+    _write(d, "odd-order", "kind: prompt\ntitle: Zed\norder: soon")
+    docs = prompts.load(d)
+    assert [x.name for x in docs] == ["research-github", "research-web", "review", "odd-order"]
+    gh = docs[0]
+    assert (gh.family, gh.variant, gh.order) == ("Research", "GitHub", 1)
+    assert gh.description == "with /github-explore: repos"  # colons after the first are kept
+    assert docs[3].order == 100
+    titles = [p.title for p in asyncio.run(build_server(_conf(tmp_path, d)).list_prompts())]
+    assert titles[:2] == ["Research: GitHub", "Research: Web"]

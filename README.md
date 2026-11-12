@@ -266,7 +266,9 @@ Rank on:
 How: the search tools and skills you use, where the report goes, when to stop.
 ```
 
-Files without `kind: prompt` are skipped. Keep the library beside your notes, not in
+Variants of one prompt share a `family` (with a `variant` label and an `order`): the
+web UI lists the family once and toggles between its variants, and MCP lists each as
+`<family>: <variant>`. Files without `kind: prompt` are skipped. Keep the library beside your notes, not in
 this repo: it describes how you work. The tool is only advertised when a library is
 configured.
 

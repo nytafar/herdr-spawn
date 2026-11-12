@@ -1147,7 +1147,8 @@ class _Server(MCPServer):
 
     async def list_prompts(self) -> list[MCPPrompt]:
         return [
-            MCPPrompt(name=d.name, title=d.title, description=d.description, arguments=[])
+            MCPPrompt(name=d.name, title=f"{d.family}: {d.variant}" if d.family and d.variant else d.title,
+                      description=d.description, arguments=[])
             for d in promptmod.load(self._prompts_dir) if d.group == "template"
         ]
 

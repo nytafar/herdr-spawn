@@ -5,7 +5,7 @@
 const TOKEN_KEY = "herdr-spawn-token";
 const HOST_KEY = "herdr-spawn-host";
 const $ = (id) => document.getElementById(id);
-const state = { meta: null, browsing: null, session: null, view: "spawn", prompts: [] };
+const state = { meta: null, browsing: null, session: null, view: "spawn", prompts: [], families: new Map(), filled: "" };
 
 function el(tag, text, cls) {
   const n = document.createElement(tag);
@@ -228,13 +228,20 @@ async function loadPrompts() {
   let res;
   try { res = await api("/api/prompts"); } catch (err) { return; }
   state.prompts = res.prompts || [];
+  // Variants of one prompt share a family: one entry in the list, a toggle each.
+  state.families = new Map();
+  for (const p of state.prompts.filter((p) => p.group === "template")) {
+    const key = p.family ? "family:" + p.family : p.name;
+    if (!state.families.has(key)) state.families.set(key, { label: p.family || p.title, items: [] });
+    state.families.get(key).items.push(p);
+  }
   const sel = $("template");
   sel.replaceChildren(el("option", "none"));
   sel.firstChild.value = "";
-  for (const p of state.prompts.filter((p) => p.group === "template")) {
-    const o = el("option", p.title);
-    o.value = p.name;
-    o.title = p.description || "";
+  for (const [key, fam] of state.families) {
+    const o = el("option", fam.label);
+    o.value = key;
+    o.title = fam.items[0].description || "";
     sel.append(o);
   }
   chips($("snippets"), "snippet", (p) => appendText($("prompt"), p.body));
@@ -268,20 +275,42 @@ function setSelect(sel, value) {
   sel.value = value;
 }
 
-$("template").addEventListener("change", () => {
-  const p = state.prompts.find((p) => p.name === $("template").value);
-  if (!p) return;
+// Fill the form from one prompt. Asks first only when the box holds something
+// other than what the last fill put there, so toggling variants is one tap.
+function applyTemplate(p) {
   const area = $("prompt");
-  if (area.value.trim() && !confirm("Replace the prompt with this template?")) {
-    $("template").value = "";
-    return;
-  }
+  if (area.value.trim() && area.value !== state.filled && !confirm("Replace the prompt with this template?")) return false;
   area.value = p.body;
+  state.filled = p.body;
   if (p.agent && [...$("agent").options].some((o) => o.value === p.agent)) $("agent").value = p.agent;
-  if (p.model) $("model").value = p.model;
+  $("model").value = p.model || "";
+  $("effort").value = "";
   if (p.effort) setSelect($("effort"), p.effort);
+  document.querySelectorAll("#variants .chip").forEach((c) => c.classList.toggle("active", c.dataset.name === p.name));
   area.focus();
   area.setSelectionRange(0, 0);
+  return true;
+}
+
+$("template").addEventListener("change", () => {
+  const box = $("variants");
+  box.replaceChildren();
+  const fam = state.families.get($("template").value);
+  if (!fam) return;
+  if (fam.items.length > 1) {
+    for (const p of fam.items) {
+      const b = el("button", p.variant || p.title, "chip");
+      b.type = "button";
+      b.dataset.name = p.name;
+      b.title = p.description || "";
+      b.addEventListener("click", () => applyTemplate(p));
+      box.append(b);
+    }
+  }
+  if (!applyTemplate(fam.items[0])) {
+    $("template").value = "";
+    box.replaceChildren();
+  }
 });
 
 // --- agents ----------------------------------------------------------------------

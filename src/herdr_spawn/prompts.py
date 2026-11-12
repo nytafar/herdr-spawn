@@ -13,6 +13,9 @@ MCP prompt list, without a restart.
     agent: claude            # optional spawn defaults
     model: opus
     effort: high
+    family: Research         # optional: variants of one prompt share a family,
+    variant: GitHub          #   and the web UI toggles between them
+    order: 1                 #   in this order (lowest first)
     ---
     The prompt itself. Plain text; a labelled line followed by an empty line
     wherever the details of one task go.
@@ -49,6 +52,9 @@ class PromptDoc:
     agent: str | None = None
     model: str | None = None
     effort: str | None = None
+    family: str | None = None
+    variant: str | None = None
+    order: int = 100
 
     def summary(self) -> dict[str, Any]:
         """Everything but the body: what a list shows."""
@@ -98,6 +104,10 @@ def parse(path: Path) -> PromptDoc | None:
     body = body.strip("\n")
     if not body.strip():
         return None
+    try:
+        order = int(meta.get("order", 100))
+    except ValueError:
+        order = 100
     return PromptDoc(
         name=name,
         group=group,
@@ -105,18 +115,21 @@ def parse(path: Path) -> PromptDoc | None:
         description=meta.get("description", ""),
         body=body + ("" if body.endswith(" ") else "\n"),
         **{k: (meta.get(k) or None) for k in _SPAWN_KEYS},
+        family=meta.get("family") or None,
+        variant=meta.get("variant") or None,
+        order=order,
     )
 
 
 def load(folder: Path | None) -> list[PromptDoc]:
-    """Every prompt in the folder, templates first, then by title."""
+    """Every prompt in the folder: templates first, then by family or title, then order."""
     if folder is None or not folder.is_dir():
         return []
     docs = []
     for path in sorted(folder.glob("*.md"))[:MAX_FILES]:
         if path.is_file() and (doc := parse(path)):
             docs.append(doc)
-    return sorted(docs, key=lambda d: (GROUPS.index(d.group), d.title.lower()))
+    return sorted(docs, key=lambda d: (GROUPS.index(d.group), (d.family or d.title).lower(), d.order, d.title.lower()))
 
 
 def get(folder: Path | None, name: str) -> PromptDoc | None:
