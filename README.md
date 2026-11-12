@@ -1,6 +1,7 @@
 # herdr-spawn
 
-An MCP server with three tools. `spawn_agent` hands a prompt you composed in a chat to a
+An MCP server with four tools, and an optional phone-friendly web UI over the same
+operations. `spawn_agent` hands a prompt you composed in a chat to a
 **real coding agent** on one of your own machines; `agent_session` reads one back or
 sends it a follow-up; `list_agents` shows what is running. With Claude Code, Remote
 Control is on and you get back a link that opens the session in the Code tab; with the
@@ -31,7 +32,16 @@ agent_session(session_name, [message], [wait])
   -> {status, turn, doing, screen, ...}     # only sessions spawn_agent started
 list_agents([host])
   -> {agents: [{host, terminal, agent, status, cwd, where, spawned?}]}
+list_folders(host, [path])
+  -> {path, parent, folders: [{name, path, kind?}]}
 ```
+
+`list_folders` is for finding a cwd. Without a path it returns the host's allowed roots
+and vaults; with one, that folder's sub-folders. It follows the spawn rule — the path
+must resolve under `cwd_allowlist`, so `..` and symlinks cannot walk out — and is
+narrower in two ways: dot-folders are never listed or entered, and nothing under the
+host's `list_deny` is either, for trees whose folder *names* are private. `list_deny`
+only hides folders from browsing; it does not narrow where a spawn may run.
 
 `model` and `effort` are left out by default, so the agent runs on whatever it is
 configured to use; pass them to override for one spawn. They are translated to each
@@ -225,6 +235,7 @@ The settings that matter:
 | `hc_machine` | The host's name in `hc machine ls`, for a host that is not this machine. With `transport = "hc"` the host has no herdr TUI at all and is driven through hc only. |
 | `agent_bin` | Per-agent binary path under hc, e.g. `{ claude = "/root/.local/bin/claude" }`, for a host where the bare name finds a stale copy that does not report status. |
 | `space_roots` | What counts as a top folder when picking a space. Default: the host's home. |
+| `list_deny` | Folders `list_folders` never lists or descends into, even under the allowlist. Browsing only. |
 | `skip_permissions` | Per-host only, never a tool parameter. An unattended agent with permissions skipped, started from a chat message, is the one combination that can quietly do real damage. Applied with each agent's own flag, and not at all for agents whose flag isn't known. |
 
 ### Telling callers where things go
@@ -262,6 +273,47 @@ set `HERDR_SPAWN_DOCKER_NETWORK` and let it discover that network's bridge IP at
 discovery fails it falls back to **loopback**, never `0.0.0.0` — this tool starts
 autonomous coding agents, so anything that can reach the port can start one, and on a
 host without a firewall the bind address is the entire security boundary.
+
+---
+
+## The web UI
+
+A small installable web app (PWA) for spawning and following agents from a phone:
+pick a host and a folder, write the prompt, optionally set model and effort, and get
+the Remote Control link back as a link; or open the agents list, tap one you spawned,
+read its screen and send it a message. Plain HTML, CSS and JS under
+`src/herdr_spawn/web/`, no build step.
+
+It is a **second listener in the same process**, with its own app: it serves the page
+and `/api`, and has no `/mcp`. Every API call goes through the same functions as the
+MCP tools, so the two cannot drift.
+
+| Call | Same as |
+|---|---|
+| `GET /api/meta` | hosts, their agents and default cwd, for the form |
+| `POST /api/spawn` | `spawn_agent` (JSON body with the same fields) |
+| `GET /api/agents[?host=]` | `list_agents` |
+| `GET /api/sessions/<name>` · `POST` with `{"message"}` | `agent_session` |
+| `GET /api/folders?host=[&path=]` | `list_folders` |
+
+It is off unless `HERDR_SPAWN_WEB_PORT` is set (HTTP transport only). Every `/api`
+route needs `Authorization: Bearer <token>`, compared in constant time; the page asks
+for the token once and keeps it in the browser's local storage.
+
+```sh
+umask 077
+python3 -c 'import secrets; print(secrets.token_urlsafe(32))' > ~/.config/herdr-spawn/web-token
+```
+
+The token file must be mode 600 and hold at least 32 characters. Without it the web
+listener refuses to start and logs why; the MCP endpoint runs on regardless. Treat the
+token as the access control even on a private network: this endpoint starts coding
+agents in whatever `cwd_allowlist` allows. The listener refuses `0.0.0.0`, and the
+service worker never caches `/api`.
+
+To put it on a phone, give it an HTTPS name (a PWA needs a secure origin) — a reverse
+proxy or a VPN-only HTTPS proxy in front of the bind address — and use "Add to home
+screen".
 
 ---
 
@@ -491,7 +543,10 @@ src/herdr_spawn/
   spaces.py   which space a spawn joins
   rc.py       Remote Control id resolution (registry poll, pid+procStart join)
   state.py    append-only JSONL + teardown guard
+  folders.py  folder browsing for a cwd: allowlist, deny list, local or remote
   server.py   preflight, spawn sequence, follow-up tools, MCP wiring
+  web.py      the web UI's listener: token check, JSON API, static files
+  web/        the PWA itself (HTML, CSS, JS, manifest, service worker)
 deploy/
   herdr-spawn.service    systemd --user unit (%h throughout, no absolute paths)
   service.env.example    site-specific settings -> ~/.config/herdr-spawn/service.env
@@ -507,7 +562,10 @@ uv run pytest -q
 The ones that matter: `…-evil` must not pass a `…/scratch` root, symlinks must not
 escape, `rc=2` must not crash the wrapper, `--until` must never be sent, the teardown
 guard must refuse tabs it did not create and any protected workspace, and
-RC-unavailable must not be treated as failure.
+RC-unavailable must not be treated as failure. For the web UI: the folder browser
+must refuse anything outside the allowlist, under the deny list, through `..` or a
+symlink; every `/api` route must answer 401 without the token; and `/mcp` must not
+exist on the web listener.
 
 ## Licence
 

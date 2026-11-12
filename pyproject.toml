@@ -23,4 +23,7 @@ build-backend = "hatchling.build"
 packages = ["src/herdr_spawn"]
 
 [dependency-groups]
-dev = ["pytest>=8.0"]
+dev = [
+    "httpx>=0.28.1",
+    "pytest>=8.0",
+]

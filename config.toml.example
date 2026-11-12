@@ -65,6 +65,11 @@ cwd_allowlist = ["/home/you/scratch"]
 # Never a broad home or a repo root: a default is only as safe as what it points at.
 default_cwd = "/home/you/scratch"
 
+# Folders the folder browser (list_folders, the web UI) never lists or descends
+# into, even under cwd_allowlist -- for trees whose folder names are private.
+# Browsing only: it does not narrow where a spawn may run.
+# list_deny = ["/home/you/notes/clients"]
+
 # Never closed, never spawned into. Second belt behind the state-file guard.
 protected_workspaces = ["w1", "w2"]
 

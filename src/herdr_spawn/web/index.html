@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#111418">
+<title>herdr-spawn</title>
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="icon-192.png">
+<link rel="stylesheet" href="style.css">
+<script src="app.js" defer></script>
+</head>
+<body>
+<header>
+  <nav>
+    <button type="button" data-tab="spawn" class="tab active">Spawn</button>
+    <button type="button" data-tab="agents" class="tab">Agents</button>
+  </nav>
+</header>
+
+<main>
+  <section id="token-view" hidden>
+    <h1>Access token</h1>
+    <p class="muted">Paste the token from the server's token file. It is kept on this device only.</p>
+    <form id="token-form">
+      <input id="token-input" type="password" autocomplete="off" autocapitalize="off" spellcheck="false" required>
+      <button type="submit">Save</button>
+    </form>
+  </section>
+
+  <section id="spawn-view" hidden>
+    <form id="spawn-form">
+      <label>Host <select id="host" required></select></label>
+
+      <label>Folder <input id="cwd" type="text" autocapitalize="off" spellcheck="false" placeholder="default folder"></label>
+      <div id="browser">
+        <div class="row">
+          <button type="button" id="browse-top">Roots</button>
+          <button type="button" id="browse-up" disabled>Up</button>
+          <span id="browse-path" class="muted path"></span>
+        </div>
+        <ul id="folder-list" class="list"></ul>
+        <p id="browse-note" class="muted"></p>
+      </div>
+
+      <label>Prompt <textarea id="prompt" rows="7" required></textarea></label>
+
+      <div class="grid">
+        <label>Agent <select id="agent"></select></label>
+        <label>UI <select id="ui"></select></label>
+        <label>Model <input id="model" type="text" autocapitalize="off" spellcheck="false" placeholder="default"></label>
+        <label>Effort
+          <select id="effort">
+            <option value="">default</option>
+            <option>low</option><option>medium</option><option>high</option><option>xhigh</option><option>max</option>
+          </select>
+        </label>
+      </div>
+      <button type="submit" id="spawn-btn" class="primary">Spawn</button>
+    </form>
+    <div id="spawn-result" class="card" hidden></div>
+  </section>
+
+  <section id="agents-view" hidden>
+    <div class="row">
+      <button type="button" id="agents-refresh">Refresh</button>
+      <span id="agents-note" class="muted"></span>
+    </div>
+    <ul id="agent-list" class="list"></ul>
+  </section>
+
+  <section id="session-view" hidden>
+    <div class="row">
+      <button type="button" id="session-back">Back</button>
+      <button type="button" id="session-refresh">Refresh</button>
+    </div>
+    <h2 id="session-title"></h2>
+    <p id="session-status" class="muted"></p>
+    <pre id="session-screen"></pre>
+    <form id="message-form">
+      <textarea id="message" rows="3" placeholder="Message to the agent" required></textarea>
+      <button type="submit" class="primary">Send</button>
+    </form>
+  </section>
+</main>
+</body>
+</html>

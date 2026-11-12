@@ -23,12 +23,15 @@ from datetime import datetime
 from pathlib import Path
 from typing import Annotated, Any
 
+import anyio
 from mcp.server import MCPServer
 from pydantic import Field
 
 from . import config as cfg
 from . import rc as rcmod
+from . import folders as foldermod
 from . import spaces as spacemod
+from . import web as webmod
 from .agents import DEFAULT_AGENT, AgentProfile, HostAgents, advertised, discover, discover_hc
 from .agents import profile as agent_profile
 from .config import AGENT_START_TIMEOUT_DEFAULT, Config, ConfigError, HostConfig
@@ -1013,6 +1016,102 @@ def instructions(conf: Config) -> str | None:
     return "\n\n".join(parts) or None
 
 
+# --- operations -------------------------------------------------------------
+#
+# One function per tool, shared by the MCP tools and the web API so the two
+# cannot drift: each takes plain arguments and returns the result dict, with
+# refusals and failures folded in the same way for both callers.
+
+
+async def op_spawn(conf: Config, caps: dict[str, HostAgents], *, host: str, prompt: str,
+                   agent: str = DEFAULT_AGENT, cwd: str | None = None, label: str | None = None,
+                   session_name: str | None = None, workspace: str | None = None,
+                   wait: bool = False, ui: str | None = None, model: str | None = None,
+                   effort: str | None = None) -> dict[str, Any]:
+    try:
+        result = await spawn(
+            conf,
+            host_name=host,
+            prompt=prompt,
+            cwd_raw=cwd,
+            agent=agent,
+            label=label,
+            session_name_raw=session_name,
+            workspace_override=workspace,
+            wait=wait,
+            capabilities=caps,
+            ui=ui,
+            model=model,
+            effort=effort,
+        )
+    except (ConfigError, TeardownGuard) as exc:
+        result = {"status": "refused", "reason": str(exc)}
+    except HerdrError as exc:
+        result = {"status": "failed", "reason": f"{exc.code}: {exc.message}"}
+    log.info("spawn_agent host=%s agent=%s -> %s", host, agent, result.get("status"))
+    return result
+
+
+async def op_session(conf: Config, *, session_name: str, message: str | None = None,
+                     wait: bool = False) -> dict[str, Any]:
+    try:
+        result = await follow_session(conf, session_name=session_name, message=message, wait=wait)
+    except (ConfigError, TeardownGuard) as exc:
+        result = {"status": "refused", "reason": str(exc)}
+    except HerdrError as exc:
+        result = {"status": "failed", "reason": f"{exc.code}: {exc.message}"}
+    log.info("agent_session %s sent=%s -> %s", session_name, bool(message), result.get("status"))
+    return result
+
+
+async def op_list_agents(conf: Config, *, host: str | None = None) -> dict[str, Any]:
+    try:
+        return await list_hosts(conf, host)
+    except ConfigError as exc:
+        return {"status": "refused", "reason": str(exc)}
+
+
+async def op_list_folders(conf: Config, *, host: str, path: str | None = None) -> dict[str, Any]:
+    try:
+        return await foldermod.list_folders(conf.host(host), path)
+    except ConfigError as exc:
+        return {"status": "refused", "reason": str(exc)}
+    except HerdrError as exc:
+        return {"status": "failed", "reason": f"{exc.code}: {exc.message}"}
+    except OSError as exc:
+        return {"status": "failed", "reason": str(exc)}
+
+
+def ui_meta(conf: Config, caps: dict[str, HostAgents]) -> dict[str, Any]:
+    """What a client needs to render a spawn form: hosts, agents, defaults."""
+    hosts = []
+    for name in conf.host_names:
+        h = conf.hosts[name]
+        c = caps.get(name)
+        uis = [u for u in cfg.UIS if (u == "hc" and h.has_hc) or (u == "herdr" and h.has_herdr)]
+        row: dict[str, Any] = {
+            "name": name,
+            "enabled": h.enabled,
+            "default_cwd": h.default_cwd,
+            "ui": h.resolve_ui(None) if uis else None,
+            "uis": uis,
+            # None when discovery could not run: unknown, so anything may be tried.
+            "agents": list(c.available) if c and c.known else None,
+            "vaults": sorted(h.vaults),
+            # The machine this service runs on: the form's default host.
+            "this_machine": h.transport == "socket" and not h.hc_machine,
+        }
+        if not h.enabled:
+            row["reason"] = h.unavailable_reason or "disabled in config"
+        hosts.append(row)
+    return {
+        "hosts": hosts,
+        "agents": advertised(caps, conf.host_names),
+        "default_agent": DEFAULT_AGENT,
+        "uis": list(cfg.UIS),
+    }
+
+
 def build_server(conf: Config, capabilities: dict[str, HostAgents] | None = None) -> MCPServer:
     server = MCPServer(name="herdr-spawn", instructions=instructions(conf))
     caps = capabilities or {}
@@ -1047,27 +1146,11 @@ def build_server(conf: Config, capabilities: dict[str, HostAgents] | None = None
         claude returns a claude.ai/code link to continue from the Code tab. Follow
         any spawn with agent_session.
         """
-        try:
-            result = await spawn(
-                conf,
-                host_name=host,
-                prompt=prompt,
-                cwd_raw=cwd,
-                agent=agent,
-                label=label,
-                session_name_raw=session_name,
-                workspace_override=workspace,
-                wait=wait,
-                capabilities=caps,
-                ui=ui,
-                model=model,
-                effort=effort,
-            )
-        except (ConfigError, TeardownGuard) as exc:
-            result = {"status": "refused", "reason": str(exc)}
-        except HerdrError as exc:
-            result = {"status": "failed", "reason": f"{exc.code}: {exc.message}"}
-        log.info("spawn_agent host=%s agent=%s -> %s", host, agent, result.get("status"))
+        result = await op_spawn(
+            conf, caps, host=host, prompt=prompt, agent=agent, cwd=cwd, label=label,
+            session_name=session_name, workspace=workspace, wait=wait, ui=ui,
+            model=model, effort=effort,
+        )
         return json.dumps(result, indent=2)
 
     @server.tool(structured_output=False)
@@ -1077,25 +1160,18 @@ def build_server(conf: Config, capabilities: dict[str, HostAgents] | None = None
         wait: bool = False,
     ) -> str:
         """Status and screen of an agent started by spawn_agent. With `message`, send it first."""
-        try:
-            result = await follow_session(
-                conf, session_name=session_name, message=message, wait=wait
-            )
-        except (ConfigError, TeardownGuard) as exc:
-            result = {"status": "refused", "reason": str(exc)}
-        except HerdrError as exc:
-            result = {"status": "failed", "reason": f"{exc.code}: {exc.message}"}
-        log.info("agent_session %s sent=%s -> %s", session_name, bool(message), result.get("status"))
+        result = await op_session(conf, session_name=session_name, message=message, wait=wait)
         return json.dumps(result, indent=2)
 
     @server.tool(structured_output=False)
     async def list_agents(host: str | None = None) -> str:
         """Agents on the hosts with their status: working, idle, done, blocked."""
-        try:
-            result = await list_hosts(conf, host)
-        except ConfigError as exc:
-            result = {"status": "refused", "reason": str(exc)}
-        return json.dumps(result, separators=(",", ":"))
+        return json.dumps(await op_list_agents(conf, host=host), separators=(",", ":"))
+
+    @server.tool(structured_output=False)
+    async def list_folders(host: str, path: str | None = None) -> str:
+        """Sub-folders of `path` that a spawn may use as cwd. Without path: the host's allowed roots and vaults."""
+        return json.dumps(await op_list_folders(conf, host=host, path=path), separators=(",", ":"))
 
     _advertise_enum(server, "host", conf.host_names)
     _advertise_enum(server, "ui", list(cfg.UIS))
@@ -1208,6 +1284,8 @@ def main() -> None:
 
     transport = os.environ.get("HERDR_SPAWN_TRANSPORT", "stdio")
     if transport == "stdio":
+        if os.environ.get("HERDR_SPAWN_WEB_PORT", "").strip():
+            log.warning("HERDR_SPAWN_WEB_PORT is set, but the web UI only runs with streamable-http")
         server.run("stdio")
         return
 
@@ -1220,7 +1298,22 @@ def main() -> None:
     # predates the passthrough fix). A fire-and-forget spawn needs no session
     # continuity anyway.
     log.info("serving streamable-http on %s:%d (stateless)", bind, port)
-    server.run("streamable-http", host=bind, port=port, stateless_http=True)
+    # The web UI, when configured, is a second listener with its own app -- no
+    # /mcp on it. Without it, or when it must not start, this is exactly the
+    # MCP-only service it always was.
+    web = webmod.prepare(conf, caps)
+    if web is None:
+        server.run("streamable-http", host=bind, port=port, stateless_http=True)
+        return
+    anyio.run(_serve_both, server, bind, port, web)
+
+
+async def _serve_both(server: MCPServer, bind: str, port: int, web: tuple[Any, list[Any]]) -> None:
+    app, socks = web
+    async with anyio.create_task_group() as tg:
+        tg.start_soon(webmod.serve, app, socks)
+        await server.run_streamable_http_async(host=bind, port=port, stateless_http=True)
+        tg.cancel_scope.cancel()
 
 
 if __name__ == "__main__":

@@ -76,6 +76,10 @@ class HostConfig:
     # from a vault tool knows it relative to the vault, not where the vault sits
     # on disk; this lets it pass `<vault>/<path>` as the cwd.
     vaults: dict[str, str] = field(default_factory=dict)
+    # Folders the folder browser never lists or descends into, even when they sit
+    # under cwd_allowlist -- for trees whose folder *names* are sensitive. It only
+    # hides them from browsing; it does not narrow where a spawn may run.
+    list_deny: tuple[str, ...] = ()
     skip_permissions: bool = False
     sandbox: bool = False
     unavailable_reason: str | None = None
@@ -254,6 +258,7 @@ def load(path: Path | str | None = None) -> Config:
             space_roots=tuple(h.get("space_roots", ())),
             agent_bin={str(k): str(v) for k, v in (h.get("agent_bin") or {}).items()},
             vaults={str(k): str(v) for k, v in (h.get("vaults") or {}).items()},
+            list_deny=tuple(str(p) for p in h.get("list_deny", ())),
             skip_permissions=bool(h.get("skip_permissions", False)),
             sandbox=bool(h.get("sandbox", False)),
             unavailable_reason=h.get("unavailable_reason"),
