@@ -25,6 +25,9 @@ AGENT_START_TIMEOUT_MAX = 300_000
 AGENT_START_TIMEOUT_DEFAULT = 60_000
 
 
+UIS = ("hc", "herdr")
+
+
 class ConfigError(Exception):
     pass
 
@@ -33,7 +36,9 @@ class ConfigError(Exception):
 class HostConfig:
     name: str
     enabled: bool
-    transport: str  # "socket" | "ssh"
+    # How the herdr TUI is reached: "socket" | "ssh", or "hc" for a host that has
+    # no herdr TUI at all and is only ever driven through herdr-core.
+    transport: str
     herdr_bin: str = ""
     socket_path: str | None = None
     ssh_target: str | None = None
@@ -49,6 +54,19 @@ class HostConfig:
     default_cwd: str | None = None
     protected_workspaces: tuple[str, ...] = ()
     inbox_label: str = "inbox"
+    # --- herdr-core (hc) ----------------------------------------------------
+    # Where a spawn lands unless the caller asks otherwise: "hc" (herdr-core, so
+    # the session shows up in the Herdr app and its mobile client) or "herdr" (a
+    # pane in the herdr TUI).
+    ui: str = "hc"
+    # hc always runs on the machine this service runs on, even for a remote host:
+    # the local core relays to the far one. So this path is local, unlike herdr_bin.
+    hc_bin: str = ""
+    # The host's name in `hc machine ls`. None means this machine.
+    hc_machine: str | None = None
+    # A spawn joins the space of its top folder: the first path component below
+    # one of these roots. Defaults to the host's home, so ~/code/x lands in `code`.
+    space_roots: tuple[str, ...] = ()
     skip_permissions: bool = False
     sandbox: bool = False
     unavailable_reason: str | None = None
@@ -68,6 +86,41 @@ class HostConfig:
         if not self.herdr_bin:
             # Never a bare "herdr": a systemd --user unit's PATH has no ~/.local/bin.
             object.__setattr__(self, "herdr_bin", str(Path(self.home) / ".local" / "bin" / "herdr"))
+        if not self.hc_bin:
+            object.__setattr__(self, "hc_bin", str(Path.home() / ".local" / "bin" / "hc"))
+        if not self.space_roots:
+            object.__setattr__(self, "space_roots", (self.home,))
+
+    @property
+    def has_herdr(self) -> bool:
+        return self.transport in ("socket", "ssh")
+
+    @property
+    def has_hc(self) -> bool:
+        """An ssh host is only reachable through hc if it is also an hc machine."""
+        return self.transport != "ssh" or bool(self.hc_machine)
+
+    def resolve_ui(self, requested: str | None) -> str:
+        """Which UI a spawn uses: what the caller asked for, else the host default.
+
+        An explicit request the host cannot serve is refused rather than quietly
+        swapped for the other one -- the caller asked to watch it somewhere
+        specific. Only the *default* falls back.
+        """
+        want = (requested or "").strip().lower()
+        if want and want not in UIS:
+            raise ConfigError(f"ui must be one of {', '.join(UIS)}, got {requested!r}")
+        if want == "herdr" and not self.has_herdr:
+            raise ConfigError(f"host {self.name!r} has no herdr TUI; it is reached through hc only")
+        if want == "hc" and not self.has_hc:
+            raise ConfigError(f"host {self.name!r} is not an hc machine (set hc_machine); use ui=herdr")
+        if want:
+            return want
+        if self.ui == "hc" and self.has_hc:
+            return "hc"
+        if self.has_herdr:
+            return "herdr"
+        return "hc"
 
     def resolve_cwd(self, raw: str | None) -> Path:
         """Resolve `raw` (or the host default) and prove it sits under an allowed root.
@@ -137,8 +190,13 @@ def load(path: Path | str | None = None) -> Config:
     hosts: dict[str, HostConfig] = {}
     for name, h in (raw.get("hosts") or {}).items():
         transport = h.get("transport", "socket")
-        if transport not in ("socket", "ssh"):
-            raise ConfigError(f"host {name!r}: transport must be 'socket' or 'ssh', got {transport!r}")
+        if transport not in ("socket", "ssh", "hc"):
+            raise ConfigError(
+                f"host {name!r}: transport must be 'socket', 'ssh' or 'hc', got {transport!r}"
+            )
+        ui = h.get("ui", "hc")
+        if ui not in UIS:
+            raise ConfigError(f"host {name!r}: ui must be 'hc' or 'herdr', got {ui!r}")
         hosts[name] = HostConfig(
             name=name,
             enabled=bool(h.get("enabled", False)),
@@ -155,6 +213,10 @@ def load(path: Path | str | None = None) -> Config:
             default_cwd=h.get("default_cwd"),
             protected_workspaces=tuple(h.get("protected_workspaces", ())),
             inbox_label=h.get("inbox_label", "inbox"),
+            ui=ui,
+            hc_bin=h.get("hc_bin", ""),
+            hc_machine=h.get("hc_machine"),
+            space_roots=tuple(h.get("space_roots", ())),
             skip_permissions=bool(h.get("skip_permissions", False)),
             sandbox=bool(h.get("sandbox", False)),
             unavailable_reason=h.get("unavailable_reason"),

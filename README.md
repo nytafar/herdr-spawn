@@ -1,38 +1,75 @@
 # herdr-spawn
 
-An MCP server with one tool. `spawn_agent` hands a prompt you composed in a chat to a
-**real coding agent** on one of your own machines. With Claude Code that means Remote
+An MCP server with three tools. `spawn_agent` hands a prompt you composed in a chat to a
+**real coding agent** on one of your own machines; `agent_session` reads one back or
+sends it a follow-up; `list_agents` shows what is running. With Claude Code, Remote
 Control is on and you get back a link that opens the session in the Code tab; with the
-other agents you get a live pane you take over in the terminal.
+other agents you get a live terminal you take over.
 
 The chat does what a chat is good at — thinking the task through with you — and then
 the actual work happens in a real terminal, on a real checkout, with your real
 credentials, on the machine that has them. You keep the conversation; the agent keeps
 the filesystem.
 
-Built on [herdr](https://herdr.dev), a terminal workspace manager for AI coding
-agents, which supplies the workspaces, tabs, panes and the `agent start` /
-`agent prompt` verbs this drives.
+Built on [herdr](https://herdr.dev). By default a spawn runs in **herdr-core** (`hc`),
+so it shows up in the Herdr app and its mobile client, in the space of the folder it
+works in. Ask for `ui: "herdr"` and it lands in a pane of the herdr terminal TUI
+instead, as it always did.
 
 ---
 
 ## What it does
 
 ```
-spawn_agent(host, prompt, [agent], [cwd], [label], [session_name], [workspace], [wait])
-  -> {status, host, agent, session_name, workspace_id, tab_id, pane_id, cwd,
-      session_id, agent_status, remote_url | continue_with}
+spawn_agent(host, prompt, [agent], [cwd], [label], [session_name], [wait],
+            [ui], [model], [effort], [workspace])
+  -> {status, host, agent, ui, session_name, cwd, session_id, remote_url,
+      terminal, space_id            # ui = hc
+      workspace_id, tab_id, pane_id # ui = herdr
+     }
+agent_session(session_name, [message], [wait])
+  -> {status, turn, doing, screen, ...}     # only sessions spawn_agent started
+list_agents([host])
+  -> {agents: [{host, terminal, agent, status, cwd, where, spawned?}]}
 ```
 
+`model` and `effort` are left out by default, so the agent runs on whatever it is
+configured to use; pass them to override for one spawn. They are translated to each
+agent's own flags, and refused for an agent whose flags are not known rather than
+silently dropped.
+
+### Where a spawn lands (`ui: "hc"`, the default)
+
+The terminal joins a space in the Herdr app, chosen from its folder:
+
+1. the deepest existing space whose folder is the cwd or a parent of it, so a repo that
+   has its own space gets its spawns;
+2. else the space of the cwd's **top folder**, the first path component under one of
+   the host's `space_roots` (default: the home directory). `~/code/anything` lands in
+   `code`, `~/notes/x` in `notes`, and with `space_roots = ["/var/www"]` a spawn
+   anywhere in a site lands in that site's space;
+3. else that top-folder space is created. Its id is derived from the folder, so later
+   spawns there join it instead of making another.
+
+A space opened at a root itself (`~`) is never matched: it contains everything.
+
+`agent_session` only talks to sessions in this service's own record. `list_agents`
+lists every agent `hc` reports on the host, and marks the ones `agent_session` can
+reach with `spawned`.
+
+### The sequence
+
 1. **Preflight** — host enabled, the agent available *there*, `cwd` resolves under an
-   allowed root and is already trusted by that agent, herdr answering on that host.
+   allowed root and is already trusted by that agent, hc (or herdr) answering on that host.
    Nothing is created until all of it holds: a failure after a tab exists would leave
    an orphaned pane sitting on a dialog, which is worse than a clean refusal.
-2. Find or create the `inbox` workspace and a tab in it, `--no-focus`.
-3. Start the agent in the tab's pane, with that agent's own flags.
+2. Pick the space (hc), or find or create the `inbox` workspace and a tab in it (herdr).
+3. Start the agent with its own flags. Under hc the prompt rides along as the last
+   argument where the binary takes one, because text typed at an agent that is still
+   booting can be dropped.
 4. Resolve the claude.ai Remote Control id — Claude Code only.
 5. Append a record to `~/.local/state/herdr-spawn/spawns.jsonl`.
-6. Submit the prompt, under a per-pane lock.
+6. Under herdr, submit the prompt under a per-pane lock.
 
 A good spawn comes back in a few seconds:
 
@@ -182,7 +219,10 @@ The settings that matter:
 |---|---|
 | `cwd_allowlist` | **The** blast-radius control. A spawn's cwd must resolve under one of these roots — fully resolved, so `…/scratch-evil` does not pass a `…/scratch` root and symlinks cannot walk out. |
 | `default_cwd` | Where a spawn lands when the caller names no cwd. Must itself be under `cwd_allowlist`; a misconfigured one is refused, not trusted. A host without it refuses any spawn that names no cwd. |
-| `protected_workspaces` | Never closed, never spawned into. |
+| `protected_workspaces` | herdr TUI only. Never closed, never spawned into. |
+| `ui` | The host's default landing place: `hc` (default) or `herdr`. A caller can still ask for the other. |
+| `hc_machine` | The host's name in `hc machine ls`, for a host that is not this machine. With `transport = "hc"` the host has no herdr TUI at all and is driven through hc only. |
+| `space_roots` | What counts as a top folder when picking a space. Default: the host's home. |
 | `skip_permissions` | Per-host only, never a tool parameter. An unattended agent with permissions skipped, started from a chat message, is the one combination that can quietly do real damage. Applied with each agent's own flag, and not at all for agents whose flag isn't known. |
 
 See [`config.toml.example`](config.toml.example) for the full annotated set.
@@ -436,10 +476,12 @@ logs and serves the verbose schema instead.
 src/herdr_spawn/
   config.py   host registry, cwd allowlist, path-traversal-safe resolution
   agents.py   per-agent launch flags and trust stores; per-host availability discovery
-  herdr.py    CLI wrapper; the three return conventions
+  herdr.py    herdr CLI wrapper; the three return conventions
+  hc.py       herdr-core CLI wrapper, plus the layout document read
+  spaces.py   which space a spawn joins
   rc.py       Remote Control id resolution (registry poll, pid+procStart join)
   state.py    append-only JSONL + teardown guard
-  server.py   preflight, spawn sequence, MCP wiring
+  server.py   preflight, spawn sequence, follow-up tools, MCP wiring
 deploy/
   herdr-spawn.service    systemd --user unit (%h throughout, no absolute paths)
   service.env.example    site-specific settings -> ~/.config/herdr-spawn/service.env

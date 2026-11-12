@@ -661,3 +661,269 @@ def test_rc_happy_path_builds_url(tmp_path):
     out = asyncio.run(rcmod.resolve(sessions_dir=tmp_path, pid=1234, ceiling_s=0.01))
     assert out.available is True
     assert out.url == "https://claude.ai/code/session_abc123"
+
+
+# --- hc: the default landing place -------------------------------------------
+
+from herdr_spawn import spaces  # noqa: E402
+from herdr_spawn.hc import Hc  # noqa: E402
+from herdr_spawn.server import (  # noqa: E402
+    _hc_agent_pid,
+    _hc_first_turn,
+    _tidy_screen,
+    follow_session,
+    spawn,
+)
+
+HOME = "/home/me"
+LAYOUT = [
+    {"id": "sp-home", "name": "sysadmin", "folder": HOME},
+    {"id": "sp-hvelv", "name": "hvelv", "folder": f"{HOME}/hvelv"},
+    {"id": "sp-hvelv2", "name": "", "folder": f"{HOME}/hvelv"},
+    {"id": "sp-code", "name": "herdr", "folder": f"{HOME}/code"},
+    {"id": "sp-repo", "name": "livesync", "folder": f"{HOME}/code/livesync"},
+    {"id": "sp-named", "name": "notes", "folder": "/elsewhere"},
+]
+
+
+def test_top_folder_is_first_component_below_a_root():
+    assert spaces.top_folder(f"{HOME}/code/x/y", (HOME,)) == f"{HOME}/code"
+    assert spaces.top_folder("/var/www/site.no/htdocs/wp", (HOME, "/var/www")) == "/var/www/site.no"
+    # Outside every root, and a root itself, are their own top folder.
+    assert spaces.top_folder("/srv/thing", (HOME,)) == "/srv/thing"
+    assert spaces.top_folder(HOME, (HOME,)) == HOME
+
+
+def test_a_repo_with_its_own_space_wins_over_its_top_folder():
+    assert spaces.pick_space(LAYOUT, f"{HOME}/code/livesync/src", (HOME,)) == ("sp-repo", True)
+    assert spaces.pick_space(LAYOUT, f"{HOME}/code/other", (HOME,)) == ("sp-code", True)
+
+
+def test_space_at_a_root_is_never_matched():
+    """A space opened at ~ contains everything, so it says nothing."""
+    sid, existed = spaces.pick_space(LAYOUT, f"{HOME}/scratch/x", (HOME,))
+    assert sid != "sp-home" and existed is False
+
+
+def test_tie_prefers_the_space_named_after_its_folder():
+    assert spaces.pick_space(LAYOUT, f"{HOME}/hvelv/registry", (HOME,)) == ("sp-hvelv", True)
+
+
+def test_top_folder_name_matches_a_space_made_elsewhere():
+    assert spaces.pick_space(LAYOUT, f"{HOME}/notes/2026", (HOME,)) == ("sp-named", True)
+
+
+def test_new_space_id_is_stable_per_top_folder_and_app_shaped():
+    a, _ = spaces.pick_space([], f"{HOME}/scratch/a", (HOME,))
+    b, _ = spaces.pick_space([], f"{HOME}/scratch/b/c", (HOME,))
+    other, _ = spaces.pick_space([], f"{HOME}/play", (HOME,))
+    assert a == b != other
+    assert re.fullmatch(r"sp[0-9a-f]{32}", a)
+    # Once the app has adopted it, the same spawn finds it as existing.
+    assert spaces.pick_space([{"id": a, "name": "", "folder": ""}], f"{HOME}/scratch/z", (HOME,)) == (a, True)
+
+
+def test_ui_defaults_to_hc_and_herdr_only_on_request(tmp_path):
+    h = host(tmp_path)
+    assert h.resolve_ui(None) == "hc"
+    assert h.resolve_ui("herdr") == "herdr"
+    with pytest.raises(ConfigError):
+        h.resolve_ui("tmux")
+
+
+def test_ui_request_a_host_cannot_serve_is_refused_not_swapped(tmp_path):
+    hc_only = host(tmp_path, transport="hc", hc_machine="web")
+    assert hc_only.resolve_ui(None) == "hc"
+    with pytest.raises(ConfigError, match="no herdr TUI"):
+        hc_only.resolve_ui("herdr")
+
+    plain_ssh = ssh_host(tmp_path)
+    assert plain_ssh.resolve_ui(None) == "herdr"  # only the default falls back
+    with pytest.raises(ConfigError, match="hc machine"):
+        plain_ssh.resolve_ui("hc")
+
+
+def test_model_and_effort_use_each_agents_own_flags(tmp_path):
+    h = host(tmp_path)
+    assert _agent_args(h, agents.profile("claude"), "s", "opus", "high") == [
+        "--remote-control", "s", "--model", "opus", "--effort", "high",
+    ]
+    assert _agent_args(h, agents.profile("codex"), "s", "gpt-x", "low") == [
+        "--model", "gpt-x", "-c", "model_reasoning_effort=low",
+    ]
+    # Omitted means the agent's own default: no flag at all.
+    assert _agent_args(h, agents.profile("claude"), "s", None, "") == ["--remote-control", "s"]
+
+
+def test_override_is_refused_for_unknown_agents_and_flag_shaped_values(tmp_path):
+    h = host(tmp_path)
+    with pytest.raises(ConfigError, match="don't know how to set model"):
+        _agent_args(h, agents.profile("opencode"), "s", "big", None)
+    for bad in ("--dangerously-skip-permissions", "a b", "x;y", "-m"):
+        with pytest.raises(ConfigError):
+            _agent_args(h, agents.profile("claude"), "s", bad, None)
+        with pytest.raises(ConfigError):
+            _agent_args(h, agents.profile("claude"), "s", None, bad)
+
+
+def _fake_hc(tmp_path: Path, body: str) -> str:
+    """A stand-in hc that logs each call's argv on one line, unit-separated."""
+    p = tmp_path / "hc"
+    log = tmp_path / "hc.log"
+    p.write_text(
+        "#!/bin/sh\n"
+        f'for a in "$@"; do printf "%s\\037" "$a" >> {shlex.quote(str(log))}; done\n'
+        f'printf "\\n" >> {shlex.quote(str(log))}\n' + body
+    )
+    p.chmod(p.stat().st_mode | stat.S_IEXEC)
+    return str(p)
+
+
+def _hc_calls(tmp_path: Path) -> list[list[str]]:
+    return [c.split("\x1f")[:-1] for c in (tmp_path / "hc.log").read_text().splitlines() if c]
+
+
+def test_hc_structured_error_is_parsed(tmp_path):
+    bin_ = _fake_hc(tmp_path, """echo '{"error":{"kind":"name_taken","message":"taken","hint":"pick another"}}' >&2; exit 1\n""")
+    hc = Hc(host(tmp_path, hc_bin=bin_))
+    with pytest.raises(HerdrError) as ei:
+        asyncio.run(hc.run(["run"]))
+    assert ei.value.code == "name_taken" and "pick another" in ei.value.message
+
+
+def test_hc_missing_binary_reports_unavailable(tmp_path):
+    hc = Hc(host(tmp_path, hc_bin=str(tmp_path / "nope")))
+    with pytest.raises(HerdrError) as ei:
+        asyncio.run(hc.run(["ls"]))
+    assert ei.value.code == "HERDR_UNAVAILABLE"
+
+
+def test_hc_ls_keeps_only_this_hosts_terminals(tmp_path):
+    bin_ = _fake_hc(tmp_path, """echo '{"terminals":[{"address":"t1"},{"address":"web/t2"},{"address":"other/t3"}]}'\n""")
+    local = asyncio.run(Hc(host(tmp_path, hc_bin=bin_)).ls())
+    remote = asyncio.run(Hc(host(tmp_path, hc_bin=bin_, hc_machine="web")).ls())
+    assert [t["address"] for t in local] == ["t1"]
+    assert [t["address"] for t in remote] == ["web/t2"]
+
+
+def test_hc_start_never_takes_a_parent_and_keeps_the_prompt_one_argument(tmp_path):
+    bin_ = _fake_hc(tmp_path, """echo '{"address":"web/t9"}'\n""")
+    hc = Hc(host(tmp_path, hc_bin=bin_, hc_machine="web"))
+    prompt = "fix it; rm -rf $HOME && echo 'done'"
+    asyncio.run(hc.start("s1", "/srv/x", ["claude", "--model", "opus", prompt], {"herdr.space": "sp1"}))
+    (call,) = _hc_calls(tmp_path)
+    assert "--no-parent" in call and "--bg" in call
+    assert call[call.index("--on") + 1] == "web"
+    assert call[call.index("--label") + 1] == "herdr.space=sp1"
+    assert call[call.index("--") + 1 :] == ["claude", "--model", "opus", prompt]
+
+
+def test_first_turn_waits_through_the_startup_idle(tmp_path, monkeypatch):
+    """A booting agent says `idle` before it picks the prompt up. That is not done."""
+    replies = [
+        {"reason": "status", "status": "idle", "turn": 0},
+        {"reason": "status", "status": "done", "turn": 1},
+    ]
+
+    class FakeHc:
+        async def wait(self, terminal, timeout_s=600):
+            return replies.pop(0)
+
+    async def no_sleep(_):
+        return None
+
+    monkeypatch.setattr("herdr_spawn.server.asyncio.sleep", no_sleep)
+    out = asyncio.run(_hc_first_turn(FakeHc(), "t1"))
+    assert out["status"] == "done" and not replies
+
+
+def test_agent_pid_prefers_a_foreground_that_is_the_agent():
+    shim = {"pid": 10, "foreground": {"pid": 22, "name": "claude", "argv": ["/x/claude"]}}
+    direct = {"pid": 10, "foreground": {"pid": 10, "name": "node", "argv": ["node"]}}
+    assert _hc_agent_pid(shim, "claude") == 22
+    assert _hc_agent_pid(direct, "claude") == 10
+    assert _hc_agent_pid({}, "claude") is None
+
+
+def test_tidy_screen_drops_tui_padding():
+    assert _tidy_screen("a   \n\n\n\n\nb\n\n\n") == "a\n\nb"
+
+
+def _conf(tmp_path: Path, h: HostConfig) -> cfg.Config:
+    return cfg.Config(hosts={h.name: h}, state_dir=tmp_path / "state")
+
+
+def test_follow_refuses_a_session_we_did_not_spawn(tmp_path):
+    with pytest.raises(ConfigError, match="no spawn named"):
+        asyncio.run(follow_session(_conf(tmp_path, host(tmp_path)), session_name="someone-elses"))
+
+
+def test_workspace_override_belongs_to_the_tui(tmp_path):
+    h = host(tmp_path)
+    with pytest.raises(ConfigError, match="ui=herdr"):
+        asyncio.run(spawn(
+            _conf(tmp_path, h), host_name=h.name, prompt="x", cwd_raw=str(tmp_path / "allowed"),
+            workspace_override="w9",
+        ))
+
+
+def test_hc_spawn_end_to_end_against_a_fake_core(tmp_path):
+    """Space picked from the layout, labels set, prompt as the last argument, and
+    the record written so the follow-up tool can find it."""
+    scratch = tmp_path / "allowed"
+    scratch.mkdir()
+    doc = {"jsonrpc": "2.0", "id": 1, "result": {"value": {"spaces": [
+        {"id": "sp-scratch", "name": "", "folder": str(scratch)}]}, "version": 3}}
+    body = f"""
+case "$1" in
+  server) echo '{{}}' ;;
+  connect) cat >/dev/null; echo {shlex.quote(json.dumps(doc))} ;;
+  run) echo '{{"address":"t7","argv":["opencode"]}}' ;;
+  get) echo '{{"address":"t7","state":"live","pid":4242,"turn":1,"status":{{"state":"done","msg":"m"}},"foreground":{{"cwd":"/x"}}}}' ;;
+  wait) echo '{{"reason":"status","status":"idle","turn":0}}' ;;
+  send) echo '{{"turn":1,"started":true}}' ;;
+  read) printf 'hello\\n\\n\\n\\n' ;;
+esac
+"""
+    bin_ = _fake_hc(tmp_path, body)
+    h = host(tmp_path, hc_bin=bin_, space_roots=(str(tmp_path),))
+    conf = _conf(tmp_path, h)
+    # opencode: no trust store to preflight, no Remote Control, prompt typed in.
+    res = asyncio.run(spawn(conf, host_name=h.name, prompt="do the thing", cwd_raw=str(scratch),
+                            agent="opencode", session_name_raw="job1"))
+    assert res["status"] == "spawned" and res["ui"] == "hc"
+    assert res["terminal"] == "t7" and res["space_id"] == "sp-scratch"
+    assert "space_created" not in res and "remote_url" not in res
+
+    calls = _hc_calls(tmp_path)
+    run = next(c for c in calls if c[0] == "run")
+    assert "herdr.space=sp-scratch" in run and run[run.index("--") + 1 :] == ["opencode"]
+    send = next(c for c in calls if c[0] == "send")
+    assert send[-2:] == ["t7", "do the thing"]
+
+    rec = Store(conf.state_dir).latest_by_name("job1")
+    assert rec["ui"] == "hc" and rec["terminal"] == "t7"
+
+    followed = asyncio.run(follow_session(conf, session_name="job1", message="and then?"))
+    assert followed["status"] == "done" and followed["sent"] is True and followed["screen"] == "hello"
+
+
+def test_old_records_without_ui_are_herdr_panes(tmp_path):
+    store = Store(tmp_path)
+    store.path.parent.mkdir(parents=True, exist_ok=True)
+    store.path.write_text('{"session_name":"old","host":"local","pane_id":"w1:p1"}\n')
+    assert store.latest_by_name("old").get("ui", "herdr") == "herdr"
+    assert SpawnRecord(session_name="n", host="h").ui == "herdr"
+
+
+def test_config_accepts_an_hc_only_host(tmp_path):
+    p = tmp_path / "c.toml"
+    p.write_text(
+        '[hosts.web]\nenabled = true\ntransport = "hc"\nhc_machine = "web"\nhome = "/root"\n'
+        'cwd_allowlist = ["/var/www"]\nspace_roots = ["/var/www"]\n'
+    )
+    h = cfg.load(p).host("web")
+    assert (h.has_hc, h.has_herdr, h.space_roots) == (True, False, ("/var/www",))
+    p.write_text('[hosts.web]\ntransport = "hc"\nui = "tmux"\n')
+    with pytest.raises(ConfigError):
+        cfg.load(p)

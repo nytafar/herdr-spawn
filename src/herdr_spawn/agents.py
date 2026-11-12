@@ -50,6 +50,17 @@ class AgentProfile:
     # Which trust store to preflight against, if any. An untrusted directory does
     # not fail -- the agent opens and sits on a dialog forever, looking alive.
     trust: str | None = None
+    # How this binary takes a model and an effort override; `{}` is the value.
+    # Empty means unknown, and an override is then refused rather than dropped:
+    # a spawn that silently ran on the default model is the worse surprise.
+    model_args: tuple[str, ...] = ()
+    effort_args: tuple[str, ...] = ()
+    # Whether the first prompt can ride along as the last argument. It is the
+    # reliable delivery under hc -- text typed at an agent that is still booting
+    # can be dropped -- so it is used wherever the binary is known to take one.
+    prompt_as_arg: bool = False
+    # Extra flags needed only when the agent runs in an hc terminal.
+    hc_args: tuple[str, ...] = ()
 
 
 PROFILES: dict[str, AgentProfile] = {
@@ -59,6 +70,9 @@ PROFILES: dict[str, AgentProfile] = {
         skip_permissions_flag="--dangerously-skip-permissions",
         sandbox_flag="--sandbox",
         trust="claude",
+        model_args=("--model", "{}"),
+        effort_args=("--effort", "{}"),
+        prompt_as_arg=True,
     ),
     "codex": AgentProfile(
         kind="codex",
@@ -66,6 +80,12 @@ PROFILES: dict[str, AgentProfile] = {
         # flag this dangerous wrong is not the kind of mistake you find later.
         skip_permissions_flag="--dangerously-bypass-approvals-and-sandbox",
         trust="codex",
+        model_args=("--model", "{}"),
+        effort_args=("-c", "model_reasoning_effort={}"),
+        prompt_as_arg=True,
+        # Without it Codex hands its commands to a daemon outside the terminal,
+        # where hc can neither show nor stop them.
+        hc_args=("--no-daemon",),
     ),
 }
 
@@ -151,6 +171,28 @@ async def discover(h: Herdr) -> HostAgents:
     log.info("discovered on %s: %d supported, %d available (%s)",
              h.host.name, len(kinds), len(available), ", ".join(available) or "none")
     return HostAgents(kinds=kinds, installed=installed, available=available)
+
+
+# With no herdr to ask, these are the binaries worth looking for on an hc-only
+# host. Anything else there is still startable -- hc runs any program -- it just
+# is not advertised.
+HC_KINDS = ("claude", "codex", "opencode", "pi", "gemini", "amp")
+
+
+async def discover_hc(hc) -> HostAgents:  # noqa: ANN001 - Hc; imported lazily to avoid a cycle
+    """`discover`, for a host that has no herdr TUI: only the PATH sweep."""
+    sweep = (
+        f'{_PATH_PREFIX}\n'
+        f'for k in {" ".join(HC_KINDS)}; do command -v "$k" >/dev/null 2>&1 && echo "$k"; done\n'
+        "exit 0\n"
+    )
+    try:
+        out = await hc.sh(sweep, timeout=45)
+    except (HerdrError, OSError, TimeoutError) as exc:
+        return HostAgents(error=f"could not probe installed agents: {exc}")
+    installed = tuple(line.strip() for line in out.splitlines() if line.strip())
+    log.info("discovered on %s via hc: %s", hc.host.name, ", ".join(installed) or "none")
+    return HostAgents(kinds=HC_KINDS, installed=installed, available=installed)
 
 
 def advertised(by_host: dict[str, HostAgents], enabled: list[str]) -> list[str]:

@@ -56,6 +56,11 @@ class Herdr:
     def __init__(self, host: HostConfig):
         self.host = host
 
+    @property
+    def is_local(self) -> bool:
+        """Whether the host's filesystem is this machine's."""
+        return self.host.transport != "ssh"
+
     def _ssh_prefix(self) -> list[str]:
         argv = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10"]
         if self.host.ssh_identity:

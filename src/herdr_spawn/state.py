@@ -47,6 +47,12 @@ class SpawnRecord:
     prompt_sha256: str | None = None
     caller: str | None = None
     rc_available: bool = False
+    # Records written before hc existed have no `ui`; they were all herdr panes.
+    ui: str = "herdr"
+    terminal: str | None = None  # the hc address, e.g. `t7` or `machine/t7`
+    space_id: str | None = None
+    model: str | None = None
+    effort: str | None = None
     closed_at: str | None = None
 
     def to_json(self) -> str:
@@ -87,6 +93,15 @@ class Store:
 
     def latest_by_tab(self, host: str, tab_id: str) -> dict[str, Any] | None:
         match = [r for r in self.all() if r.get("host") == host and r.get("tab_id") == tab_id]
+        return match[-1] if match else None
+
+    def latest_by_name(self, session_name: str, host: str | None = None) -> dict[str, Any] | None:
+        """The newest record for a session we spawned -- the only sessions the
+        follow-up tools will talk to."""
+        match = [
+            r for r in self.all()
+            if r.get("session_name") == session_name and (host is None or r.get("host") == host)
+        ]
         return match[-1] if match else None
 
     def owns_tab(self, host: str, tab_id: str) -> bool:

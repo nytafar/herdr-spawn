@@ -29,7 +29,17 @@ home = "/home/you"
 # claude_sessions_dir = "/home/you/.claude/sessions"
 # claude_config       = "/home/you/.claude.json"
 
-# Spawned tabs land in a workspace with this label, created on first use.
+# Where a spawn lands unless the caller asks otherwise. "hc" is herdr-core: the
+# session shows in the Herdr app and its mobile client, in the space of the folder
+# it works in. "herdr" is a pane in the herdr terminal TUI.
+ui = "hc"
+# hc_bin = "/home/you/.local/bin/hc"
+# A spawn joins the space of its top folder: the first path component below one of
+# these. Default is the home, so ~/code/x lands in `code`.
+# space_roots = ["/home/you"]
+
+# herdr TUI only: spawned tabs land in a workspace with this label, created on
+# first use.
 inbox_label = "inbox"
 
 # Which coding agents this host can run is NOT declared here -- it is discovered at
@@ -74,6 +84,28 @@ cwd_allowlist = ["/Users/you/scratch"]
 default_cwd = "/Users/you/scratch"
 inbox_label = "inbox"
 
+# To follow this host's spawns in the Herdr app too, add it as an hc machine
+# (`hc machine add`) and name it here; without it, spawns there use the TUI.
+# hc_machine = "laptop"
+
 # Shown verbatim when a caller targets a disabled host. Say what is missing, so
 # the refusal is actionable rather than a dead end.
 # unavailable_reason = "ssh works but `agent start --kind claude` has never been proven here"
+
+
+# ---------------------------------------------------------------------------
+# A host with no herdr TUI at all, driven only through herdr-core. It must be an
+# hc machine on the box this service runs on:
+#
+#     hc machine ls        # must list it as connected
+#
+# `home` is the REMOTE user's home. With space_roots = ["/var/www"], a spawn
+# anywhere inside a site lands in that site's space.
+# ---------------------------------------------------------------------------
+[hosts.web]
+enabled = false
+transport = "hc"
+hc_machine = "web"
+home = "/root"
+cwd_allowlist = ["/var/www/staging.example.com"]
+space_roots = ["/var/www"]
