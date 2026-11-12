@@ -305,6 +305,10 @@ umask 077
 python3 -c 'import secrets; print(secrets.token_urlsafe(32))' > ~/.config/herdr-spawn/web-token
 ```
 
+`HERDR_SPAWN_WEB_AUTH=none` in `service.env` runs it without a token, for a network
+only you are on. Every write still needs an `X-Herdr-Spawn` header, so a page on
+another site cannot trigger a spawn from your browser.
+
 The token file must be mode 600 and hold at least 32 characters. Without it the web
 listener refuses to start and logs why; the MCP endpoint runs on regardless. Treat the
 token as the access control even on a private network: this endpoint starts coding

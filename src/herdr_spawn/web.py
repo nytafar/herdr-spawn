@@ -5,10 +5,15 @@ app: it serves the static page and `/api`, and has no `/mcp` route at all. Every
 `/api` call goes through the `op_*` functions the MCP tools use, so the two
 surfaces cannot drift apart.
 
-The API starts coding agents, so it never runs without a bearer token. The token
-is read from a file at start (mode 600, at least 32 characters); without one the
-listener refuses to start and the MCP endpoint carries on alone. Whatever network
-it is exposed on -- a VPN included -- is not the access control; the token is.
+The API starts coding agents, so by default it needs a bearer token, read from a
+file at start (mode 600, at least 32 characters); without one the listener refuses
+to start and the MCP endpoint carries on alone.
+
+`HERDR_SPAWN_WEB_AUTH=none` turns the token off, for a listener whose network is
+the access control -- a private VPN only its owner is on. That is a decision to
+state out loud, never the result of a missing file. Either way every write needs
+the `X-Herdr-Spawn` header, which a page on another site cannot send: without it,
+any web page open in a browser that can reach this listener could start an agent.
 """
 
 from __future__ import annotations
@@ -79,6 +84,9 @@ def token_ok(header: str | None, token: bytes) -> bool:
     return hmac.compare_digest(value.strip().encode("utf-8"), token)
 
 
+CSRF_HEADER = b"x-herdr-spawn"
+
+
 def _is_api(path: str) -> bool:
     return path == "/api" or path.startswith("/api/")
 
@@ -86,9 +94,9 @@ def _is_api(path: str) -> bool:
 class _Guard:
     """Bearer auth on /api, no caching of /api, security headers on everything."""
 
-    def __init__(self, app: ASGIApp, token: bytes):
+    def __init__(self, app: ASGIApp, token: bytes | None):
         self.app = app
-        self.token = token
+        self.token = token  # None: auth is off, by explicit configuration
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http":
@@ -111,13 +119,21 @@ class _Guard:
             # /mcp included -- does not exist here.
             await JSONResponse({"status": "not_found"}, status_code=404)(scope, receive, send_with_headers)
             return
-        if api:
-            auth = dict(scope.get("headers") or []).get(b"authorization")
+        req_headers = dict(scope.get("headers") or [])
+        if api and self.token is not None:
+            auth = req_headers.get(b"authorization")
             if not token_ok(auth.decode("latin-1") if auth else None, self.token):
                 resp = JSONResponse({"status": "unauthorized"}, status_code=401,
                                     headers={"www-authenticate": "Bearer"})
                 await resp(scope, receive, send_with_headers)
                 return
+        if api and scope["method"] not in ("GET", "HEAD") and CSRF_HEADER not in req_headers:
+            # A cross-site form or fetch cannot add a custom header without a CORS
+            # preflight, and this app answers none.
+            resp = JSONResponse({"status": "forbidden", "reason": "missing X-Herdr-Spawn header"},
+                                status_code=403)
+            await resp(scope, receive, send_with_headers)
+            return
         await self.app(scope, receive, send_with_headers)
 
 
@@ -157,7 +173,7 @@ SPAWN_FIELDS = {"host", "prompt", "agent", "cwd", "label", "session_name", "work
                 "wait", "ui", "model", "effort"}
 
 
-def build_web_app(conf: Config, caps: dict[str, HostAgents], token: bytes) -> ASGIApp:
+def build_web_app(conf: Config, caps: dict[str, HostAgents], token: bytes | None) -> ASGIApp:
     # Imported here so server.py can import this module without a cycle.
     from . import server as srv
 
@@ -274,12 +290,16 @@ def prepare(conf: Config, caps: dict[str, HostAgents]) -> tuple[ASGIApp, list[so
         if settings is None:
             return None
         port, binds, token_file = settings
-        token = load_token(token_file)
+        auth = os.environ.get("HERDR_SPAWN_WEB_AUTH", "token").strip().lower()
+        if auth not in ("token", "none"):
+            raise WebConfigError(f"HERDR_SPAWN_WEB_AUTH must be 'token' or 'none', got {auth!r}")
+        token = load_token(token_file) if auth == "token" else None
         socks = bind_sockets(binds, port)
     except (WebConfigError, OSError) as exc:
         log.error("web listener not started: %s", exc)
         return None
-    log.info("serving the web UI on %s port %d", ", ".join(binds), port)
+    log.info("serving the web UI on %s port %d (%s)", ", ".join(binds), port,
+             "bearer token" if token else "NO AUTH: the network is the access control")
     return build_web_app(conf, caps, token), socks
 
 

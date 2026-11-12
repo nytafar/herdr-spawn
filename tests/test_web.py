@@ -206,7 +206,7 @@ def client(tmp_path, tree) -> TestClient:
     return TestClient(web.build_web_app(conf, {}, TOKEN.encode()))
 
 
-AUTH = {"Authorization": f"Bearer {TOKEN}"}
+AUTH = {"Authorization": f"Bearer {TOKEN}", "X-Herdr-Spawn": "1"}
 
 
 def test_every_api_route_needs_the_token(client):
@@ -256,3 +256,44 @@ def test_spawn_body_is_validated(client):
     assert client.post("/api/spawn", headers=AUTH, json=["x"]).status_code == 400
     r = client.post("/api/spawn", headers=AUTH, json={"host": "test", "prompt": "x", "cwd": "/etc"})
     assert r.status_code == 422 and "not under an allowed root" in json.loads(r.text)["reason"]
+
+
+# --- auth off, and the cross-site guard -------------------------------------------
+
+
+def test_auth_none_serves_without_a_token_but_must_be_asked_for(tmp_path, monkeypatch):
+    conf = cfg.Config(hosts={"test": host(tmp_path)}, state_dir=tmp_path / "state")
+    open_client = TestClient(web.build_web_app(conf, {}, None))
+    assert open_client.get("/api/meta").status_code == 200
+
+    # A missing token file alone never turns auth off.
+    monkeypatch.setenv("HERDR_SPAWN_WEB_PORT", "0")
+    monkeypatch.setenv("HERDR_SPAWN_WEB_TOKEN_FILE", str(tmp_path / "missing"))
+    assert web.prepare(conf, {}) is None
+    monkeypatch.setenv("HERDR_SPAWN_WEB_AUTH", "nope")
+    assert web.prepare(conf, {}) is None
+    monkeypatch.setenv("HERDR_SPAWN_WEB_AUTH", "none")
+    prepared = web.prepare(conf, {})
+    assert prepared is not None
+    for s in prepared[1]:
+        s.close()
+
+
+def test_writes_need_the_custom_header_even_with_auth_off(tmp_path, monkeypatch):
+    """Without it, any page open in a browser on the same network could spawn."""
+    from herdr_spawn import server as srv
+
+    called = []
+
+    async def fake_spawn(*a, **kw):
+        called.append(kw)
+        return {"status": "spawned"}
+
+    monkeypatch.setattr(srv, "spawn", fake_spawn)
+    conf = cfg.Config(hosts={"test": host(tmp_path)}, state_dir=tmp_path / "state")
+    c = TestClient(web.build_web_app(conf, {}, None))
+    body = {"host": "test", "prompt": "x"}
+    assert c.post("/api/spawn", json=body).status_code == 403
+    assert not called
+    assert c.post("/api/spawn", json=body, headers={"X-Herdr-Spawn": "1"}).status_code == 200
+    assert called

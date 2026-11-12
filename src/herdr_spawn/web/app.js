@@ -19,9 +19,11 @@ function el(tag, text, cls) {
 class Unauthorized extends Error {}
 
 async function api(path, opts = {}) {
+  // No token stored is fine when the server runs without auth; if it wants one
+  // it answers 401 and the token view comes up.
   const token = localStorage.getItem(TOKEN_KEY);
-  if (!token) throw new Unauthorized();
-  const headers = { Authorization: "Bearer " + token };
+  const headers = { "X-Herdr-Spawn": "1" };
+  if (token) headers.Authorization = "Bearer " + token;
   if (opts.body !== undefined) headers["Content-Type"] = "application/json";
   const res = await fetch(path, {
     method: opts.method || "GET",
@@ -54,7 +56,6 @@ function show(view) {
 }
 
 async function start() {
-  if (!localStorage.getItem(TOKEN_KEY)) { show("token"); return; }
   try {
     state.meta = await api("/api/meta");
   } catch (err) { handle(err, $("browse-note")); return; }
@@ -73,7 +74,6 @@ $("token-form").addEventListener("submit", (e) => {
 });
 
 document.querySelectorAll(".tab").forEach((b) => b.addEventListener("click", () => {
-  if (!localStorage.getItem(TOKEN_KEY)) { show("token"); return; }
   show(b.dataset.tab);
   if (b.dataset.tab === "agents") loadAgents();
 }));
