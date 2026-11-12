@@ -1,7 +1,7 @@
 # herdr-spawn
 
-An MCP server with four tools, and an optional phone-friendly web UI over the same
-operations. `spawn_agent` hands a prompt you composed in a chat to a
+An MCP server with four tools (five with a prompt library), and an optional
+phone-friendly web UI over the same operations. `spawn_agent` hands a prompt you composed in a chat to a
 **real coding agent** on one of your own machines; `agent_session` reads one back or
 sends it a follow-up; `list_agents` shows what is running. With Claude Code, Remote
 Control is on and you get back a link that opens the session in the Code tab; with the
@@ -238,6 +238,38 @@ The settings that matter:
 | `list_deny` | Folders `list_folders` never lists or descends into, even under the allowlist. Browsing only. |
 | `skip_permissions` | Per-host only, never a tool parameter. An unattended agent with permissions skipped, started from a chat message, is the one combination that can quietly do real damage. Applied with each agent's own flag, and not at all for agents whose flag isn't known. |
 
+### A prompt library
+
+Point `[service] prompts_dir` at a folder of markdown files, one prompt per file, and
+three things read it live (an edit shows up without a restart):
+
+- the web UI's spawn form: pick a **template** and the prompt box is filled (with its
+  `model`, `effort` and `agent`), tap a **snippet** to append a clause, and in a running
+  session tap a **follow-up** to fill the message box. Everything stays editable;
+- an MCP tool, `prompt_examples([name])`: the list, or one prompt's text, for a calling
+  model to adapt into a specific brief rather than send as is;
+- the MCP prompt list (`prompts/list`, `prompts/get`): the templates, for clients that
+  offer server prompts in their own UI.
+
+```markdown
+---
+kind: prompt
+group: template            # template | snippet | followup
+title: Research: what exists
+description: One line, shown in lists.
+model: opus                # optional: agent, model, effort
+---
+Research what exists for:
+
+Rank on:
+
+How: the search tools and skills you use, where the report goes, when to stop.
+```
+
+Files without `kind: prompt` are skipped. Keep the library beside your notes, not in
+this repo: it describes how you work. The tool is only advertised when a library is
+configured.
+
 ### Telling callers where things go
 
 A calling model can read the schema but not your habits. Put a short map of what
@@ -295,6 +327,7 @@ MCP tools, so the two cannot drift.
 | `GET /api/agents[?host=]` | `list_agents` |
 | `GET /api/sessions/<name>` · `POST` with `{"message"}` | `agent_session` |
 | `GET /api/folders?host=[&path=]` | `list_folders` |
+| `GET /api/prompts` | `prompt_examples` (every prompt, with its text) |
 
 It is off unless `HERDR_SPAWN_WEB_PORT` is set (HTTP transport only). Every `/api`
 route needs `Authorization: Bearer <token>`, compared in constant time; the page asks
@@ -548,6 +581,7 @@ src/herdr_spawn/
   rc.py       Remote Control id resolution (registry poll, pid+procStart join)
   state.py    append-only JSONL + teardown guard
   folders.py  folder browsing for a cwd: allowlist, deny list, local or remote
+  prompts.py  the prompt library: a folder of markdown prompts, read live
   server.py   preflight, spawn sequence, follow-up tools, MCP wiring
   web.py      the web UI's listener: token check, JSON API, static files
   web/        the PWA itself (HTML, CSS, JS, manifest, service worker)

@@ -222,6 +222,10 @@ def build_web_app(conf: Config, caps: dict[str, HostAgents], token: bytes | None
         res = await srv.op_session(conf, session_name=name, message=message, wait=wait)
         return JSONResponse(res, status_code=_http_status(res))
 
+    async def prompts(request: Request) -> JSONResponse:
+        res = srv.op_prompt_examples(conf, bodies=True)
+        return JSONResponse(res, status_code=_http_status(res))
+
     async def api_404(request: Request) -> JSONResponse:
         return JSONResponse({"status": "not_found"}, status_code=404)
 
@@ -229,6 +233,7 @@ def build_web_app(conf: Config, caps: dict[str, HostAgents], token: bytes | None
         Route("/meta", meta, methods=["GET"]),
         Route("/agents", agents, methods=["GET"]),
         Route("/folders", folders, methods=["GET"]),
+        Route("/prompts", prompts, methods=["GET"]),
         Route("/spawn", spawn, methods=["POST"]),
         Route("/sessions/{name}", session, methods=["GET", "POST"]),
         Route("/{rest:path}", api_404, methods=["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE"]),

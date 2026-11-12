@@ -25,11 +25,14 @@ from typing import Annotated, Any
 
 import anyio
 from mcp.server import MCPServer
+from mcp.types import GetPromptResult, PromptMessage, TextContent
+from mcp.types import Prompt as MCPPrompt
 from pydantic import Field
 
 from . import config as cfg
 from . import rc as rcmod
 from . import folders as foldermod
+from . import prompts as promptmod
 from . import spaces as spacemod
 from . import web as webmod
 from .agents import DEFAULT_AGENT, AgentProfile, HostAgents, advertised, discover, discover_hc
@@ -1082,6 +1085,24 @@ async def op_list_folders(conf: Config, *, host: str, path: str | None = None) -
         return {"status": "failed", "reason": str(exc)}
 
 
+def op_prompt_examples(conf: Config, *, name: str | None = None, bodies: bool = False) -> dict[str, Any]:
+    """The prompt library: an index without a name, one prompt in full with one.
+
+    `bodies` returns every prompt in full at once, for the web UI's one-tap fill.
+    """
+    if not conf.prompts_dir:
+        if bodies:
+            return {"prompts": []}
+        return {"status": "refused", "reason": "no prompt library is configured ([service] prompts_dir)"}
+    if name:
+        doc = promptmod.get(conf.prompts_dir, name)
+        if doc is None:
+            return {"status": "refused", "reason": f"no prompt named {name!r}; call without a name for the list"}
+        return doc.full()
+    docs = promptmod.load(conf.prompts_dir)
+    return {"prompts": [d.full() if bodies else d.summary() for d in docs]}
+
+
 def ui_meta(conf: Config, caps: dict[str, HostAgents]) -> dict[str, Any]:
     """What a client needs to render a spawn form: hosts, agents, defaults."""
     hosts = []
@@ -1112,8 +1133,36 @@ def ui_meta(conf: Config, caps: dict[str, HostAgents]) -> dict[str, Any]:
     }
 
 
+class _Server(MCPServer):
+    """MCPServer whose prompt list is the site's prompt library, read live.
+
+    Templates only: they are what a client offers as a starting point. Snippets
+    and follow-ups stay with the `prompt_examples` tool and the web UI. The SDK's
+    handlers call these two methods, so overriding them is the whole change.
+    """
+
+    def __init__(self, *args: Any, prompts_dir: Path | None = None, **kwargs: Any):
+        super().__init__(*args, **kwargs)
+        self._prompts_dir = prompts_dir
+
+    async def list_prompts(self) -> list[MCPPrompt]:
+        return [
+            MCPPrompt(name=d.name, title=d.title, description=d.description, arguments=[])
+            for d in promptmod.load(self._prompts_dir) if d.group == "template"
+        ]
+
+    async def get_prompt(self, name: str, arguments: dict[str, Any] | None = None, context: Any = None) -> GetPromptResult:
+        doc = promptmod.get(self._prompts_dir, name)
+        if doc is None or doc.group != "template":
+            raise ValueError(f"Unknown prompt: {name}")
+        return GetPromptResult(
+            description=doc.description,
+            messages=[PromptMessage(role="user", content=TextContent(type="text", text=doc.body))],
+        )
+
+
 def build_server(conf: Config, capabilities: dict[str, HostAgents] | None = None) -> MCPServer:
-    server = MCPServer(name="herdr-spawn", instructions=instructions(conf))
+    server = _Server(name="herdr-spawn", instructions=instructions(conf), prompts_dir=conf.prompts_dir)
     caps = capabilities or {}
 
     # This server is enabled in every chat and every Claude Code session, so its
@@ -1172,6 +1221,12 @@ def build_server(conf: Config, capabilities: dict[str, HostAgents] | None = None
     async def list_folders(host: str, path: str | None = None) -> str:
         """Sub-folders of `path` that a spawn may use as cwd. Without path: the host's allowed roots and vaults."""
         return json.dumps(await op_list_folders(conf, host=host, path=path), separators=(",", ":"))
+
+    if conf.prompts_dir:
+        @server.tool(structured_output=False)
+        async def prompt_examples(name: str | None = None) -> str:
+            """How this user briefs agents for each kind of task (research, review, deploy, ...): which skills to use, where docs go, how to report. Without name: the list; with one: the text. Adapt one into a specific spawn_agent prompt."""
+            return json.dumps(op_prompt_examples(conf, name=name), separators=(",", ":"))
 
     _advertise_enum(server, "host", conf.host_names)
     _advertise_enum(server, "ui", list(cfg.UIS))

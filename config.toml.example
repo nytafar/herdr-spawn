@@ -13,6 +13,9 @@ state_dir = "~/.local/state/herdr-spawn"
 # instructions at the start of a session. Defaults to instructions.md beside this
 # file when that exists. Keep it short: every session that connects reads it.
 # instructions_file = "~/.config/herdr-spawn/instructions.md"
+# A folder of prompt templates, snippets and follow-ups (README: "A prompt
+# library"), read live by the web UI, the prompt_examples tool and MCP prompts.
+# prompts_dir = "~/notes/prompts"
 
 
 # ---------------------------------------------------------------------------

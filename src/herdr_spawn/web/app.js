@@ -5,7 +5,7 @@
 const TOKEN_KEY = "herdr-spawn-token";
 const HOST_KEY = "herdr-spawn-host";
 const $ = (id) => document.getElementById(id);
-const state = { meta: null, browsing: null, session: null, view: "spawn" };
+const state = { meta: null, browsing: null, session: null, view: "spawn", prompts: [] };
 
 function el(tag, text, cls) {
   const n = document.createElement(tag);
@@ -60,6 +60,7 @@ async function start() {
     state.meta = await api("/api/meta");
   } catch (err) { handle(err, $("browse-note")); return; }
   fillForm();
+  loadPrompts();
   show(state.view === "session" ? "agents" : state.view);
   if (state.view === "agents") loadAgents();
 }
@@ -218,6 +219,70 @@ function renderSpawn(res) {
   }
   if (res.screen || res.pane_tail) out.append(el("pre", res.screen || res.pane_tail));
 }
+
+// --- prompt library ------------------------------------------------------------
+// Read-only here: one tap fills the form, then it is yours to edit. Templates
+// replace the prompt, snippets append to it, follow-ups fill the message box.
+
+async function loadPrompts() {
+  let res;
+  try { res = await api("/api/prompts"); } catch (err) { return; }
+  state.prompts = res.prompts || [];
+  const sel = $("template");
+  sel.replaceChildren(el("option", "none"));
+  sel.firstChild.value = "";
+  for (const p of state.prompts.filter((p) => p.group === "template")) {
+    const o = el("option", p.title);
+    o.value = p.name;
+    o.title = p.description || "";
+    sel.append(o);
+  }
+  chips($("snippets"), "snippet", (p) => appendText($("prompt"), p.body));
+  chips($("followups"), "followup", (p) => appendText($("message"), p.body));
+}
+
+function chips(box, group, onTap) {
+  box.replaceChildren();
+  for (const p of state.prompts.filter((p) => p.group === group)) {
+    const b = el("button", p.title, "chip");
+    b.type = "button";
+    b.title = p.description || "";
+    b.addEventListener("click", () => onTap(p));
+    box.append(b);
+  }
+}
+
+function appendText(area, text) {
+  const cur = area.value.replace(/\s+$/, "");
+  area.value = cur ? cur + "\n\n" + text : text;
+  area.focus();
+}
+
+function setSelect(sel, value) {
+  if (!value) return;
+  if (![...sel.options].some((o) => o.value === value)) {
+    const o = el("option", value);
+    o.value = value;
+    sel.append(o);
+  }
+  sel.value = value;
+}
+
+$("template").addEventListener("change", () => {
+  const p = state.prompts.find((p) => p.name === $("template").value);
+  if (!p) return;
+  const area = $("prompt");
+  if (area.value.trim() && !confirm("Replace the prompt with this template?")) {
+    $("template").value = "";
+    return;
+  }
+  area.value = p.body;
+  if (p.agent && [...$("agent").options].some((o) => o.value === p.agent)) $("agent").value = p.agent;
+  if (p.model) $("model").value = p.model;
+  if (p.effort) setSelect($("effort"), p.effort);
+  area.focus();
+  area.setSelectionRange(0, 0);
+});
 
 // --- agents ----------------------------------------------------------------------
 

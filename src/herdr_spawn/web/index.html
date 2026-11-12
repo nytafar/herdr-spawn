@@ -44,7 +44,9 @@
         <p id="browse-note" class="muted"></p>
       </div>
 
-      <label>Prompt <textarea id="prompt" rows="7" required></textarea></label>
+      <label>Template <select id="template"><option value="">none</option></select></label>
+      <label>Prompt <textarea id="prompt" rows="10" required></textarea></label>
+      <div id="snippets" class="chips"></div>
 
       <div class="grid">
         <label>Agent <select id="agent"></select></label>
@@ -79,6 +81,7 @@
     <p id="session-status" class="muted"></p>
     <pre id="session-screen"></pre>
     <form id="message-form">
+      <div id="followups" class="chips"></div>
       <textarea id="message" rows="3" placeholder="Message to the agent" required></textarea>
       <button type="submit" class="primary">Send</button>
     </form>

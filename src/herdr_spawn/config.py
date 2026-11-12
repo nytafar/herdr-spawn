@@ -198,6 +198,9 @@ class Config:
     # in which folder. It describes one person's machines, so it is a file beside
     # the config, never something in this repo.
     instructions_file: Path | None = None
+    # A folder of prompt templates (see prompts.py), read live. Like the
+    # instructions, it describes one person's work, so it never lives here.
+    prompts_dir: Path | None = None
 
     def host(self, name: str) -> HostConfig:
         h = self.hosts.get(name)
@@ -271,10 +274,15 @@ def load(path: Path | str | None = None) -> Config:
     instructions_file = Path(raw_file).expanduser() if raw_file else p.parent / "instructions.md"
     if raw_file and not instructions_file.is_file():
         raise ConfigError(f"instructions_file {instructions_file} does not exist")
+    raw_prompts = service.get("prompts_dir")
+    prompts_dir = Path(raw_prompts).expanduser() if raw_prompts else None
+    if prompts_dir is not None and not prompts_dir.is_dir():
+        raise ConfigError(f"prompts_dir {prompts_dir} is not a directory")
     return Config(
         hosts=hosts,
         state_dir=state_dir,
         instructions_file=instructions_file if instructions_file.is_file() else None,
+        prompts_dir=prompts_dir,
     )
 
 

@@ -1,7 +1,7 @@
 // Minimal service worker: enough to install to the home screen and open the
 // shell offline. Network first, so a deploy shows up on the next load. Never
 // touches /api -- those responses are not cached here or anywhere.
-const CACHE = "herdr-spawn-v1";
+const CACHE = "herdr-spawn-v2";
 const SHELL = ["./", "index.html", "app.js", "style.css", "manifest.webmanifest", "icon.svg", "icon-192.png", "icon-512.png"];
 
 self.addEventListener("install", (e) => {
