@@ -240,6 +240,10 @@ async def resolve(
 # 200ms for 15s is both slow and rude to the remote sshd. So the loop runs remotely
 # and returns once, in two labelled sections.
 #
+# `LC_ALL=C` is load-bearing too: under a non-English locale ps prints day and
+# month names in that language ("tor. 12 nov."), which never equals the English
+# string Claude Code wrote, and every good spawn reads as a recycled pid.
+#
 # `TZ=UTC` on the ps is load-bearing. Claude Code writes macOS `procStart` as a UTC
 # `ctime` string, while `ps -o lstart=` prints local time -- so anywhere off UTC the
 # two differ by the offset and the pid-recycle guard rejects every good spawn. On
@@ -257,7 +261,7 @@ echo "---PROCSTART---"
 if [ -r "/proc/$P/stat" ]; then
   sed 's/.*) //' "/proc/$P/stat" | cut -d' ' -f20
 else
-  TZ=UTC ps -o lstart= -p "$P" 2>/dev/null | sed 's/  *$//'
+  LC_ALL=C TZ=UTC ps -o lstart= -p "$P" 2>/dev/null | sed 's/  *$//'
 fi
 echo "---RECORD---"
 # `|| true`: no record yet is the ordinary "Remote Control never connected"

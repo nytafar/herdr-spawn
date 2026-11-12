@@ -928,3 +928,8 @@ def test_config_accepts_an_hc_only_host(tmp_path):
     p.write_text('[hosts.web]\ntransport = "hc"\nui = "tmux"\n')
     with pytest.raises(ConfigError):
         cfg.load(p)
+
+
+def test_remote_poll_pins_the_locale_for_ps():
+    """A Norwegian mac prints `tor. 12 nov.`; Claude Code wrote `Thu Nov 12`."""
+    assert "LC_ALL=C TZ=UTC ps -o lstart=" in rcmod._REMOTE_POLL
