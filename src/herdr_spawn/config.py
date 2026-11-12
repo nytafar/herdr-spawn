@@ -190,6 +190,10 @@ class HostConfig:
 class Config:
     hosts: dict[str, HostConfig]
     state_dir: Path = field(default=Path("~/.local/state/herdr-spawn").expanduser())
+    # Site guidance served to clients as MCP instructions: what kind of work goes
+    # in which folder. It describes one person's machines, so it is a file beside
+    # the config, never something in this repo.
+    instructions_file: Path | None = None
 
     def host(self, name: str) -> HostConfig:
         h = self.hosts.get(name)
@@ -257,7 +261,16 @@ def load(path: Path | str | None = None) -> Config:
 
     if not hosts:
         raise ConfigError(f"{p} defines no [hosts.*] tables")
-    return Config(hosts=hosts, state_dir=state_dir)
+    # Named explicitly, or picked up from beside the config when it is there.
+    raw_file = service.get("instructions_file")
+    instructions_file = Path(raw_file).expanduser() if raw_file else p.parent / "instructions.md"
+    if raw_file and not instructions_file.is_file():
+        raise ConfigError(f"instructions_file {instructions_file} does not exist")
+    return Config(
+        hosts=hosts,
+        state_dir=state_dir,
+        instructions_file=instructions_file if instructions_file.is_file() else None,
+    )
 
 
 def herdr_env(host: HostConfig) -> dict[str, str]:

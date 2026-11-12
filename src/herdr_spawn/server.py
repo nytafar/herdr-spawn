@@ -982,25 +982,35 @@ async def list_hosts(conf: Config, host_name: str | None = None) -> dict[str, An
 
 
 def instructions(conf: Config) -> str | None:
-    """What a caller cannot work out from the schema: how to name a vault folder.
+    """What a caller cannot work out from the schema: where things go.
 
-    Served once per session rather than on every request, and only when there is
-    a vault to talk about -- it names the vaults so that a caller holding a note
-    path from a vault tool does not have to guess where the vault lives on disk.
+    Two parts, both optional. How to name a vault folder, generated from the
+    config so it lists the vaults that exist; and the site's own map of which
+    work belongs in which folder, read from a file that is not in this repo.
+    Served once per session rather than on every request.
     """
+    parts: list[str] = []
     per_host = [
         f"{h.name}: {', '.join(sorted(h.vaults))}"
         for h in conf.hosts.values() if h.enabled and h.vaults
     ]
-    if not per_host:
-        return None
-    return (
-        "To start an agent on a note or folder in an Obsidian vault, pass spawn_agent's cwd "
-        "as <vault>/<path relative to that vault>, e.g. "
-        "\"myvault/projects/plan.md\". Vault paths are relative to their vault, so do not "
-        "guess an absolute path. A note path is fine: the agent starts in the note's folder, "
-        "so name the note in the prompt. Vaults by host: " + "; ".join(per_host) + "."
-    )
+    if per_host:
+        parts.append(
+            "To start an agent in an Obsidian vault, pass spawn_agent's cwd as "
+            "<vault>/<folder relative to that vault>, e.g. \"myvault/projects/website\". Vault "
+            "paths are relative to their vault, so do not guess an absolute path. If all you "
+            "have is a note, its path works too and the agent starts in the note's folder. "
+            "Vaults by host: " + "; ".join(per_host) + "."
+        )
+    if conf.instructions_file:
+        try:
+            site = conf.instructions_file.read_text(encoding="utf-8").strip()
+        except OSError as exc:
+            log.warning("could not read %s: %s", conf.instructions_file, exc)
+            site = ""
+        if site:
+            parts.append(site)
+    return "\n\n".join(parts) or None
 
 
 def build_server(conf: Config, capabilities: dict[str, HostAgents] | None = None) -> MCPServer:

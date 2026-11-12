@@ -9,6 +9,10 @@
 
 [service]
 state_dir = "~/.local/state/herdr-spawn"
+# Your own map of what work goes in which folder, served to clients as MCP
+# instructions at the start of a session. Defaults to instructions.md beside this
+# file when that exists. Keep it short: every session that connects reads it.
+# instructions_file = "~/.config/herdr-spawn/instructions.md"
 
 
 # ---------------------------------------------------------------------------

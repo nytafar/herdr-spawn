@@ -988,3 +988,22 @@ def test_instructions_name_vaults_and_are_absent_without_any(tmp_path):
     text = instructions(conf)
     assert "test: vault" in text and "relative to their vault" in text
     assert build_server(conf).instructions == text
+
+
+def test_site_instructions_file_is_served_after_the_vault_line(tmp_path):
+    from herdr_spawn.server import instructions
+
+    (tmp_path / "config.toml").write_text(
+        '[hosts.a]\nenabled = true\ncwd_allowlist = ["/x"]\nvaults = { v = "/x/v" }\n'
+    )
+    assert "Vaults by host: a: v." in instructions(cfg.load(tmp_path / "config.toml"))
+
+    (tmp_path / "instructions.md").write_text("Code goes in /x/code.\n")
+    text = instructions(cfg.load(tmp_path / "config.toml"))
+    assert text.endswith("Code goes in /x/code.") and text.index("Vaults by host") < text.index("Code goes")
+
+    (tmp_path / "config.toml").write_text(
+        '[service]\ninstructions_file = "/nope/missing.md"\n[hosts.a]\nenabled = true\n'
+    )
+    with pytest.raises(ConfigError, match="does not exist"):
+        cfg.load(tmp_path / "config.toml")

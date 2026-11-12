@@ -227,6 +227,14 @@ The settings that matter:
 | `space_roots` | What counts as a top folder when picking a space. Default: the host's home. |
 | `skip_permissions` | Per-host only, never a tool parameter. An unattended agent with permissions skipped, started from a chat message, is the one combination that can quietly do real damage. Applied with each agent's own flag, and not at all for agents whose flag isn't known. |
 
+### Telling callers where things go
+
+A calling model can read the schema but not your habits. Put a short map of what
+kind of work belongs in which folder in `~/.config/herdr-spawn/instructions.md` and it
+is served as the MCP `instructions` at the start of each session, after a generated
+line naming your vaults. It describes your machines, so it lives beside the config and
+never in this repo. `[service] instructions_file` points somewhere else.
+
 See [`config.toml.example`](config.toml.example) for the full annotated set.
 
 ---
