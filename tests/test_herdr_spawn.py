@@ -678,11 +678,11 @@ from herdr_spawn.server import (  # noqa: E402
 HOME = "/home/me"
 LAYOUT = [
     {"id": "sp-home", "name": "sysadmin", "folder": HOME},
-    {"id": "sp-hvelv", "name": "hvelv", "folder": f"{HOME}/hvelv"},
-    {"id": "sp-hvelv2", "name": "", "folder": f"{HOME}/hvelv"},
+    {"id": "sp-notes", "name": "notes", "folder": f"{HOME}/notes"},
+    {"id": "sp-notes2", "name": "", "folder": f"{HOME}/notes"},
     {"id": "sp-code", "name": "herdr", "folder": f"{HOME}/code"},
     {"id": "sp-repo", "name": "livesync", "folder": f"{HOME}/code/livesync"},
-    {"id": "sp-named", "name": "notes", "folder": "/elsewhere"},
+    {"id": "sp-named", "name": "wiki", "folder": "/elsewhere"},
 ]
 
 
@@ -706,11 +706,11 @@ def test_space_at_a_root_is_never_matched():
 
 
 def test_tie_prefers_the_space_named_after_its_folder():
-    assert spaces.pick_space(LAYOUT, f"{HOME}/hvelv/registry", (HOME,)) == ("sp-hvelv", True)
+    assert spaces.pick_space(LAYOUT, f"{HOME}/notes/registry", (HOME,)) == ("sp-notes", True)
 
 
 def test_top_folder_name_matches_a_space_made_elsewhere():
-    assert spaces.pick_space(LAYOUT, f"{HOME}/notes/2026", (HOME,)) == ("sp-named", True)
+    assert spaces.pick_space(LAYOUT, f"{HOME}/wiki/2026", (HOME,)) == ("sp-named", True)
 
 
 def test_new_space_id_is_stable_per_top_folder_and_app_shaped():
